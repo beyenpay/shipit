@@ -167,9 +167,10 @@ Next steps:
      (User=$USER_NAME, WorkingDirectory=<dir>/current) and a sudoers line:
        $USER_NAME ALL=(root) NOPASSWD: /usr/bin/systemctl restart <service>
      See https://github.com/$REPO/tree/main/examples
-  4. Verify everything:  sudo -u $USER_NAME shipit check
+  4. Verify everything:  sudo shipit check
 
-Tip: alias shipit='sudo -u $USER_NAME shipit'
+No need for 'sudo -u $USER_NAME': run shipit as root (or with sudo) and it
+switches to the $USER_NAME user by itself where that matters.
 EOF
 }
 

@@ -18,6 +18,7 @@ import (
 	"github.com/beyenpay/shipit/internal/check"
 	"github.com/beyenpay/shipit/internal/config"
 	"github.com/beyenpay/shipit/internal/deploy"
+	"github.com/beyenpay/shipit/internal/identity"
 	"github.com/beyenpay/shipit/internal/release"
 	"github.com/beyenpay/shipit/internal/selfupdate"
 	"github.com/beyenpay/shipit/internal/server"
@@ -49,6 +50,9 @@ func run(args []string) int {
 		usage()
 		return 2
 	}
+	if code, stop := ensureIdentity(rest[0], rest[1:]); stop {
+		return code
+	}
 
 	switch cmd := rest[0]; cmd {
 	case "version":
@@ -76,6 +80,36 @@ func run(args []string) int {
 		usage()
 		return 2
 	}
+}
+
+// ensureIdentity makes the command run as the account it needs. When root
+// runs a day-to-day command, shipit switches to the shipit user and starts
+// itself again, so nobody has to remember sudo -u shipit. It reports whether
+// the caller should stop, and with which exit code.
+func ensureIdentity(cmd string, args []string) (code int, stop bool) {
+	uid, _, _, known, err := identity.Lookup()
+	if err != nil {
+		printErr(err)
+		return 1, true
+	}
+	dryRun := false
+	for _, a := range args {
+		if a == "-dry-run" || a == "--dry-run" {
+			dryRun = true
+		}
+	}
+	action, msg := identity.Decide(cmd, os.Geteuid(), uid, known, dryRun)
+	switch action {
+	case identity.Refuse:
+		printErr(errors.New(msg))
+		return 1, true
+	case identity.Drop:
+		if err := identity.DropAndExec(); err != nil {
+			printErr(fmt.Errorf("cannot switch to the %s user: %w", identity.ServiceUser, err))
+		}
+		return 1, true // DropAndExec only returns on failure
+	}
+	return 0, false
 }
 
 func cmdCheck(path string, args []string) int {

@@ -85,9 +85,23 @@ Then:
 1. Edit the config: `sudo -u shipit vi /etc/shipit/shipit.yaml`
 2. Open the webhook port (default `9000/tcp`) in your firewall.
 3. Add your projects (below).
-4. Run `sudo -u shipit shipit check`.
+4. Run `sudo shipit check`.
 
-Handy: `alias shipit='sudo -u shipit shipit'`
+### Who runs what
+
+You never need `sudo -u shipit` or a shell alias. Run shipit as root (or with
+`sudo`) and it picks the right account by itself:
+
+| command | runs as | if you are root | if you are someone else |
+|---|---|---|---|
+| `deploy` `rollback` `list` `status` `check` | `shipit` | switches to `shipit` automatically | asks you to use `sudo shipit ...` |
+| `self-update` `uninstall` | `root` | runs directly | asks you to use `sudo shipit ...` |
+| `version` | anyone | | |
+
+The switch matters: files that a root-run deploy created in a project
+directory would belong to root and break later deploys started by the webhook.
+shipit therefore never runs those commands as root, and `check` reports what
+the `shipit` user can really do rather than what root can.
 
 ## Upgrade shipit
 
@@ -106,8 +120,8 @@ in progress finishes first) and checked after a few seconds. If the service does
 not come back, the previous binary is restored automatically. The old binary
 stays next to the new one as `/usr/local/bin/shipit.old`.
 
-Use plain `sudo shipit ...`, not the `sudo -u shipit` alias: the binary belongs
-to root, and the webhook deliberately cannot trigger an update. Re-running
+The webhook deliberately cannot trigger an update: the binary belongs to root,
+and an update needs root. Re-running
 `install.sh` also upgrades, and is the way to get `self-update` the first time
 on a version that predates it.
 
@@ -149,7 +163,7 @@ sudo systemctl daemon-reload && sudo systemctl enable beyen-home
 shipit ALL=(root) NOPASSWD: /usr/bin/systemctl restart beyen-home
 ```
 
-**5. Verify:** `sudo -u shipit shipit check` tells you what is still missing
+**5. Verify:** `sudo shipit check` tells you what is still missing
 (unit not found, wrong user, wrong working directory, sudoers rule absent,
 repository not reachable, token expiring).
 
@@ -185,7 +199,7 @@ expiry with `shipit check`.
 git tag v1.2.0 && git push --tags      # build, release, deploy
 ```
 
-On the server:
+On the server (as root, or prefix with `sudo`):
 
 ```bash
 shipit status                  # current / previous version and service state of every project
