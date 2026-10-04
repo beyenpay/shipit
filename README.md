@@ -89,6 +89,28 @@ Then:
 
 Handy: `alias shipit='sudo -u shipit shipit'`
 
+## Upgrade shipit
+
+On the server, as root:
+
+```bash
+sudo shipit self-update                    # to the latest release
+sudo shipit self-update -version v1.2.3    # to a specific one (also works as a downgrade)
+sudo shipit self-update -dry-run           # only show what would happen
+```
+
+It downloads the binary for the server's CPU, verifies it against
+`checksums.txt`, and runs it once (`shipit version`) before touching anything.
+Then the binary is swapped in atomically, `shipit.service` is restarted (a deploy
+in progress finishes first) and checked after a few seconds. If the service does
+not come back, the previous binary is restored automatically. The old binary
+stays next to the new one as `/usr/local/bin/shipit.old`.
+
+Use plain `sudo shipit ...`, not the `sudo -u shipit` alias: the binary belongs
+to root, and the webhook deliberately cannot trigger an update. Re-running
+`install.sh` also upgrades, and is the way to get `self-update` the first time
+on a version that predates it.
+
 ## Add a project
 
 Example: a Next.js site called `beyen-home`. Samples for every step are in [`examples/`](examples).

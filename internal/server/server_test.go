@@ -162,6 +162,26 @@ func TestHealthz(t *testing.T) {
 	}
 }
 
+func TestAbout(t *testing.T) {
+	f := newFixture(t)
+	r := f.send("GET", "/", "", "", "", "")
+	if r.code != 200 || r.str("name") != "shipit" || r.str("version") != "dev" || r.str("repository") != RepositoryURL {
+		t.Errorf("default: %d %s", r.code, r.body)
+	}
+
+	f.s.Version = "v1.2.3"
+	r = f.send("GET", "/", "", "", "", "")
+	if r.str("version") != "v1.2.3" {
+		t.Errorf("version: %s", r.body)
+	}
+	if got := r.hdr.Get("Content-Type"); !strings.HasPrefix(got, "application/json") {
+		t.Errorf("Content-Type = %q", got)
+	}
+	if r := f.send("POST", "/", "", "", "", ""); r.code != 404 && r.code != 405 {
+		t.Errorf("POST /: %d", r.code)
+	}
+}
+
 func TestSignatureVector(t *testing.T) {
 	// Independent check of the documented format; the composite action
 	// computes the same value with openssl.

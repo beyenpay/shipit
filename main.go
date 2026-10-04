@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"runtime"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -17,6 +18,8 @@ import (
 	"github.com/beyenpay/shipit/internal/check"
 	"github.com/beyenpay/shipit/internal/config"
 	"github.com/beyenpay/shipit/internal/deploy"
+	"github.com/beyenpay/shipit/internal/release"
+	"github.com/beyenpay/shipit/internal/selfupdate"
 	"github.com/beyenpay/shipit/internal/server"
 	"github.com/beyenpay/shipit/internal/uninstall"
 )
@@ -63,6 +66,8 @@ func run(args []string) int {
 		return cmdServe(*cfgPath)
 	case "uninstall":
 		return cmdUninstall(*cfgPath, rest[1:])
+	case "self-update":
+		return cmdSelfUpdate(rest[1:])
 	case "help":
 		usage()
 		return 0
@@ -93,6 +98,49 @@ func cmdCheck(path string, args []string) int {
 		return 1
 	}
 	fmt.Println("\nAll good")
+	return 0
+}
+
+func cmdSelfUpdate(args []string) int {
+	fs := flag.NewFlagSet("self-update", flag.ContinueOnError)
+	target := fs.String("version", "", "version to install, e.g. v1.2.3 (default: latest)")
+	dry := fs.Bool("dry-run", false, "show what would be done, change nothing")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
+
+	err := selfupdate.Run(ctx, selfupdate.Options{
+		Version: version,
+		Target:  *target,
+		DryRun:  *dry,
+		Binary:  uninstall.DefaultPaths.Binary,
+		Unit:    uninstall.DefaultPaths.Unit,
+		Arch:    runtime.GOARCH,
+		IsRoot:  os.Geteuid() == 0,
+		Out:     os.Stdout,
+		Source:  release.NewClient(""),
+		Settle:  3 * time.Second,
+		Run: func(name string, args ...string) error {
+			out, err := exec.Command(name, args...).CombinedOutput()
+			if err != nil {
+				return fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+			}
+			return nil
+		},
+		Probe: func(path string) (string, error) {
+			out, err := exec.Command(path, "version").Output()
+			return selfupdate.ParseVersionOutput(string(out)), err
+		},
+	})
+	if err != nil {
+		printErr(err)
+		return 1
+	}
 	return 0
 }
 
@@ -163,7 +211,9 @@ func cmdServe(cfgPath string) int {
 	log.SetFlags(log.LstdFlags | log.Lmsgprefix)
 	log.SetPrefix("shipit ")
 	log.Printf("%s starting, config %s", version, cfgPath)
-	if err := server.New(cfgPath).Run(ctx, cfg.Listen); err != nil {
+	srv := server.New(cfgPath)
+	srv.Version = version
+	if err := srv.Run(ctx, cfg.Listen); err != nil {
 		printErr(err)
 		return 1
 	}
@@ -274,7 +324,7 @@ func dash(s string) string {
 }
 
 func printErr(err error) {
-	for _, line := range strings.Split(err.Error(), "\n") {
+	for line := range strings.SplitSeq(err.Error(), "\n") {
 		fmt.Fprintf(os.Stderr, "✘ %s\n", line)
 	}
 }
@@ -300,6 +350,7 @@ Commands:
   serve                      run the webhook server
   check [-offline]           validate config, systemd units, sudoers, GitHub access
   uninstall [flags]          remove shipit (-purge, -delete-projects, -y, -dry-run)
+  self-update [flags]        upgrade shipit itself, as root (-version vX.Y.Z, -dry-run)
   version                    print version
 
 -c must come before the command. The config path is taken from -c, then

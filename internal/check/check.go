@@ -215,7 +215,7 @@ func (c *Checker) unit(ctx context.Context, b *builder, p *config.Project) {
 		return
 	}
 	props := map[string]string{}
-	for _, line := range strings.Split(out, "\n") {
+	for line := range strings.SplitSeq(out, "\n") {
 		if k, v, ok := strings.Cut(line, "="); ok {
 			props[k] = v
 		}

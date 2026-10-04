@@ -26,7 +26,12 @@ type Runner interface {
 	Rollback(ctx context.Context, project, tag string) (string, error)
 }
 
+// RepositoryURL is the home of the shipit project, shown by GET /.
+const RepositoryURL = "https://github.com/beyenpay/shipit"
+
 type Server struct {
+	// Version is reported by GET /. Empty is shown as "dev".
+	Version string
 	// ConfigPath is re-read on every request, so projects and secrets can be
 	// changed without restarting. An unreadable or invalid file is an error,
 	// never a reason to fall back to older settings.
@@ -68,6 +73,7 @@ func (s *Server) Handler() http.Handler {
 	r.NoRoute(func(c *gin.Context) { c.JSON(http.StatusNotFound, gin.H{"error": "not found"}) })
 	r.NoMethod(func(c *gin.Context) { c.JSON(http.StatusMethodNotAllowed, gin.H{"error": "method not allowed"}) })
 
+	r.GET("/", s.rateLimit, s.about)
 	r.GET("/healthz", s.rateLimit, func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"status": "ok"}) })
 
 	v1 := r.Group("/v1", s.rateLimit, s.authenticate)
@@ -109,6 +115,20 @@ func (s *Server) Run(ctx context.Context, addr string) error {
 	_ = srv.Shutdown(sctx)
 	s.jobs.wait(sctx)
 	return nil
+}
+
+// about answers GET / with what this server is. It is public on purpose and
+// reveals only the version and the project home, nothing about the setup.
+func (s *Server) about(c *gin.Context) {
+	version := s.Version
+	if version == "" {
+		version = "dev"
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"name":       "shipit",
+		"version":    version,
+		"repository": RepositoryURL,
+	})
 }
 
 // rateLimit applies the per-IP request limit.

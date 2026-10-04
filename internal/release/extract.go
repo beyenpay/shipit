@@ -155,7 +155,7 @@ func checkLink(rel, target string) error {
 	}
 	depth := strings.Count(rel, "/") // number of directories above the link
 	ups, named := 0, false
-	for _, p := range strings.Split(target, "/") {
+	for p := range strings.SplitSeq(target, "/") {
 		switch p {
 		case "", ".":
 		case "..":

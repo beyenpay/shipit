@@ -163,7 +163,7 @@ func (c *Client) DownloadVerified(ctx context.Context, repo string, rel *Release
 // ParseChecksums parses `sha256sum` output ("<hex>  <name>" or "<hex> *<name>").
 func ParseChecksums(b []byte) (map[string]string, error) {
 	m := make(map[string]string)
-	for _, line := range strings.Split(string(b), "\n") {
+	for line := range strings.SplitSeq(string(b), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue

@@ -14,8 +14,10 @@ import (
 func proj(fields string) string {
 	var b strings.Builder
 	b.WriteString("projects:\n  app:\n")
-	for _, l := range strings.Split(strings.TrimSpace(fields), "\n") {
-		b.WriteString("    " + strings.TrimSpace(l) + "\n")
+	for l := range strings.SplitSeq(strings.TrimSpace(fields), "\n") {
+		b.WriteString("    ")
+		b.WriteString(strings.TrimSpace(l))
+		b.WriteByte('\n')
 	}
 	return b.String()
 }
