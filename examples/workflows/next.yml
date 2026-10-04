@@ -1,0 +1,88 @@
+# .github/workflows/release.yml in a Next.js project.
+#
+# Requires `output: 'standalone'` in next.config.js.
+#
+# Native modules (sharp, ...) are CPU specific, so each architecture is built
+# on a runner of that architecture. Keep the Node version equal to the one on
+# the server, and the runner image close to the server's Ubuntu release (a
+# newer glibc on the runner can break native modules at runtime).
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+env:
+  ASSET: beyen-home         # = `asset` in shipit.yaml (default: project name)
+  PROJECT: beyen-home       # project name in /etc/shipit/shipit.yaml
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Package
+        env:
+          TAG: ${{ github.ref_name }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          mkdir pkg out
+          cp -r .next/standalone/. pkg/
+          mkdir -p pkg/.next
+          cp -r .next/static pkg/.next/static
+          if [ -d public ]; then cp -r public pkg/public; fi
+          tar -czf "out/$ASSET-$TAG-linux-$ARCH.tar.gz" -C pkg .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-${{ matrix.arch }}
+          path: out/*.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: package-*
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: cd dist && sha256sum ./*.tar.gz > checksums.txt && cat checksums.txt
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* --title "$TAG" --generate-notes
+          fi
+
+  deploy:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: beyenpay/shipit@v1
+        with:
+          url: ${{ secrets.SHIPIT_URL }}
+          secret: ${{ secrets.SHIPIT_SECRET }}
+          project: ${{ env.PROJECT }}

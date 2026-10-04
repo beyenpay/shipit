@@ -1,0 +1,20 @@
+# /etc/systemd/system/beyen-api.service   (Go binary)
+#
+#   sudo mkdir -p /srv/app/beyen-api/shared
+#   sudo chown -R shipit:shipit /srv/app/beyen-api
+#   sudo systemctl daemon-reload && sudo systemctl enable beyen-api
+
+[Unit]
+Description=beyen-api
+After=network.target
+
+[Service]
+User=shipit
+WorkingDirectory=/srv/app/beyen-api/current
+EnvironmentFile=/srv/app/beyen-api/shared/.env
+ExecStart=/srv/app/beyen-api/current/beyen-api
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

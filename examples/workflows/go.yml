@@ -1,0 +1,58 @@
+# .github/workflows/release.yml in a Go project.
+# Push a tag (git tag v1.2.0 && git push --tags) to build, publish and deploy.
+#
+# Change only the three values under `env`. The release carries both
+# architectures; each server picks the one it runs on.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+env:
+  ASSET: beyen-api          # name of the binary and of the package; = `asset` in shipit.yaml (default: project name)
+  PROJECT: beyen-api        # project name in /etc/shipit/shipit.yaml
+  MAIN: ./cmd/api           # package to build
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build and package
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          mkdir dist
+          for arch in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=linux GOARCH=$arch \
+              go build -trimpath -ldflags "-s -w" -o "build-$arch/$ASSET" "$MAIN"
+            tar -czf "dist/$ASSET-$TAG-linux-$arch.tar.gz" -C "build-$arch" .
+          done
+          (cd dist && sha256sum ./*.tar.gz > checksums.txt && cat checksums.txt)
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* --title "$TAG" --generate-notes
+          fi
+
+  deploy:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: beyenpay/shipit@v1
+        with:
+          url: ${{ secrets.SHIPIT_URL }}
+          secret: ${{ secrets.SHIPIT_SECRET }}
+          project: ${{ env.PROJECT }}

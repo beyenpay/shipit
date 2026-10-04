@@ -1,0 +1,6 @@
+# /etc/sudoers.d/shipit      edit with:  sudo visudo -f /etc/sudoers.d/shipit
+#
+# One line per service, exact command, no wildcards. This is the only thing
+# the shipit user may do as root.
+shipit ALL=(root) NOPASSWD: /usr/bin/systemctl restart beyen-home
+shipit ALL=(root) NOPASSWD: /usr/bin/systemctl restart beyen-api

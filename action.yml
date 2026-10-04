@@ -1,0 +1,40 @@
+name: shipit deploy
+description: Deploy or roll back a project through a shipit webhook and wait for the result.
+author: beyenpay
+
+inputs:
+  url:
+    description: Base URL of the shipit webhook, e.g. http://203.0.113.10:9000
+    required: true
+  secret:
+    description: Shared webhook secret (the `secret` in shipit.yaml).
+    required: true
+  project:
+    description: Project name as configured in shipit.yaml.
+    required: true
+  tag:
+    description: Release tag to deploy. Defaults to the tag that triggered the workflow. Empty means "previous version" for rollback.
+    required: false
+    default: ${{ github.ref_name }}
+  action:
+    description: deploy or rollback.
+    required: false
+    default: deploy
+  timeout:
+    description: Seconds to wait for the job to finish.
+    required: false
+    default: "600"
+
+runs:
+  using: composite
+  steps:
+    - name: Call shipit
+      shell: bash
+      run: ${{ github.action_path }}/scripts/call.sh
+      env:
+        SHIPIT_URL: ${{ inputs.url }}
+        SHIPIT_SECRET: ${{ inputs.secret }}
+        SHIPIT_PROJECT: ${{ inputs.project }}
+        SHIPIT_TAG: ${{ inputs.tag }}
+        SHIPIT_ACTION: ${{ inputs.action }}
+        SHIPIT_TIMEOUT: ${{ inputs.timeout }}

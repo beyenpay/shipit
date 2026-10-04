@@ -1,0 +1,25 @@
+# /etc/systemd/system/beyen-home.service   (Next.js, standalone output)
+#
+# Create the project once:
+#   sudo mkdir -p /srv/app/beyen-home/web/shared
+#   sudo chown -R shipit:shipit /srv/app/beyen-home
+#   sudo -u shipit vi /srv/app/beyen-home/web/shared/.env
+#   sudo systemctl daemon-reload && sudo systemctl enable beyen-home
+# (do not start it: <dir>/current does not exist until the first deploy)
+
+[Unit]
+Description=beyen-home
+After=network.target
+
+[Service]
+# Never root: shipit can write the code this unit executes.
+User=shipit
+WorkingDirectory=/srv/app/beyen-home/web/current
+EnvironmentFile=/srv/app/beyen-home/web/shared/.env
+Environment=NODE_ENV=production PORT=8012 HOSTNAME=127.0.0.1
+ExecStart=/usr/bin/node server.js
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,47 @@
+# Local notes (may contain server addresses)
+tips.md
+
+# Real configuration and secrets. Only examples/ is meant to be committed.
+/shipit.yaml
+/shipit.yml
+/config.yaml
+*.local.yaml
+*.local.yml
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.token
+*.secret
+secret.txt
+github.token
+webhook.secret
+
+# Build output
+/shipit
+/shipit-*
+/dist/
+/build-*/
+/dist-pkg/
+*.exe
+*.test
+*.out
+*.prof
+
+# Test coverage
+coverage.*
+*.coverprofile
+
+# Go workspace files are per-developer
+go.work
+go.work.sum
+
+# Editors, OS, tools
+.DS_Store
+._*
+.idea/
+.vscode/
+*.swp
+*~
+.claude/

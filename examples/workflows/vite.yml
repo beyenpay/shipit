@@ -1,0 +1,53 @@
+# .github/workflows/release.yml in a Vite project.
+# Static output does not depend on the CPU, so a single "-any" package is enough.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+env:
+  ASSET: beyen-web          # = `asset` in shipit.yaml (default: project name)
+  PROJECT: beyen-web        # project name in /etc/shipit/shipit.yaml
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Package
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          mkdir dist-pkg
+          tar -czf "dist-pkg/$ASSET-$TAG-any.tar.gz" -C dist .
+          (cd dist-pkg && sha256sum ./*.tar.gz > checksums.txt && cat checksums.txt)
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" dist-pkg/* --clobber
+          else
+            gh release create "$TAG" dist-pkg/* --title "$TAG" --generate-notes
+          fi
+
+  deploy:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: beyenpay/shipit@v1
+        with:
+          url: ${{ secrets.SHIPIT_URL }}
+          secret: ${{ secrets.SHIPIT_SECRET }}
+          project: ${{ env.PROJECT }}

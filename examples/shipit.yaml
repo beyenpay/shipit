@@ -1,0 +1,41 @@
+# /etc/shipit/shipit.yaml  (owner shipit, mode 0600)
+#
+# The only file shipit needs. Projects can be added or changed at any time:
+# the webhook re-reads this file on every request. Changing `listen` needs
+# `sudo systemctl restart shipit`.
+
+listen: ":9000"
+
+# Shared with CI (GitHub secret SHIPIT_SECRET). At least 16 characters.
+secret: "generated-by-install.sh"
+
+# Optional GitHub token (fine-grained PAT, Contents: read-only on the repos).
+# Required for private repositories; also lifts the anonymous API rate limit.
+token: ""
+
+projects:
+  # Next.js (standalone output), managed by systemd.
+  beyen-home:
+    type: next                       # go | vite | next
+    repo: beyenpay/home
+    dir: /srv/app/beyen-home/web
+    service: beyen-home              # systemd unit; required for go/next
+    health: http://127.0.0.1:8012/   # optional; failing it triggers an automatic rollback
+
+  # Go binary. The archive must contain an executable named after `asset`
+  # (default: the project name) in its root.
+  beyen-api:
+    type: go
+    repo: beyenpay/api
+    dir: /srv/app/beyen-api
+    service: beyen-api
+    health: http://127.0.0.1:8080/healthz
+    health_timeout: 60s              # default 30s
+    keep: 8                          # releases kept on disk, default 5 (min 2)
+
+  # Static site served by nginx from <dir>/current. No process, no service.
+  beyen-web:
+    type: vite
+    repo: beyenpay/web
+    dir: /srv/app/beyen-web
+    token: ""                        # optional per-project token, overrides the global one
