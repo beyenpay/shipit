@@ -4,13 +4,17 @@ package check
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/beyenpay/shipit/internal/config"
@@ -51,6 +55,7 @@ type Checker struct {
 
 	// The fields below exist so tests can replace the outside world.
 	Run    func(ctx context.Context, name string, args ...string) (string, error)
+	Probe  func(ctx context.Context, addr string) (PortState, string)
 	Listen func(addr string) error
 	Remote func(token string) Remote
 	Now    func() time.Time
@@ -60,6 +65,7 @@ func New(cfg *config.Config, path string, offline bool) *Checker {
 	return &Checker{
 		Cfg: cfg, Path: path, Offline: offline, User: "shipit",
 		Run:    run,
+		Probe:  probePort,
 		Listen: tryListen,
 		Remote: func(token string) Remote { return release.NewClient(token) },
 		Now:    time.Now,
@@ -71,6 +77,49 @@ func run(ctx context.Context, name string, args ...string) (string, error) {
 	defer cancel()
 	out, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
 	return strings.TrimSpace(string(out)), err
+}
+
+// PortState says who is on the webhook port.
+type PortState int
+
+const (
+	PortFree   PortState = iota // nothing is listening
+	PortShipit                  // a shipit webhook answered
+	PortOther                   // something else is listening
+)
+
+// probePort asks whatever listens on addr who it is, using the public
+// GET / endpoint. It returns the shipit version when shipit answers.
+func probePort(ctx context.Context, addr string) (PortState, string) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return PortOther, ""
+	}
+	if ip := net.ParseIP(host); host == "" || (ip != nil && ip.IsUnspecified()) {
+		host = "127.0.0.1"
+	}
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+net.JoinHostPort(host, port)+"/", nil)
+	if err != nil {
+		return PortOther, ""
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		if errors.Is(err, syscall.ECONNREFUSED) {
+			return PortFree, ""
+		}
+		return PortOther, ""
+	}
+	defer resp.Body.Close()
+	var info struct {
+		Name    string `json:"name"`
+		Version string `json:"version"`
+	}
+	if json.NewDecoder(io.LimitReader(resp.Body, 4<<10)).Decode(&info) == nil && info.Name == "shipit" {
+		return PortShipit, info.Version
+	}
+	return PortOther, ""
 }
 
 func tryListen(addr string) error {
@@ -122,10 +171,17 @@ func (c *Checker) global(ctx context.Context) Section {
 	if err := c.Cfg.ValidateServe(); err != nil {
 		b.add(Fail, "%v", err)
 	}
-	if err := c.Listen(c.Cfg.Listen); err != nil {
-		b.add(Warn, "cannot listen on %s: %v (expected if shipit.service is already running)", c.Cfg.Listen, err)
-	} else {
-		b.add(OK, "port %s is free", c.Cfg.Listen)
+	switch state, version := c.Probe(ctx, c.Cfg.Listen); state {
+	case PortShipit:
+		b.add(OK, "webhook running on %s (shipit %s)", c.Cfg.Listen, version)
+	case PortOther:
+		b.add(Fail, "%s is used by a program that does not identify as shipit (another program, or shipit older than v1.1.0); find it with: ss -ltnp", c.Cfg.Listen)
+	default:
+		if err := c.Listen(c.Cfg.Listen); err != nil {
+			b.add(Fail, "cannot listen on %s: %v", c.Cfg.Listen, err)
+		} else {
+			b.add(Warn, "nothing listens on %s: the webhook is not running (see: systemctl status shipit)", c.Cfg.Listen)
+		}
 	}
 
 	missing := false

@@ -54,6 +54,7 @@ func (r *rig) checker(t *testing.T, y string, offline bool) *Checker {
 	}
 	c := New(cfg, r.cfg, offline)
 	c.Run = r.sys.run
+	c.Probe = func(context.Context, string) (PortState, string) { return PortShipit, "v1.2.0" }
 	c.Listen = func(string) error { return nil }
 	c.Remote = func(string) Remote { return r.rem }
 	c.Now = func() time.Time { return time.Date(2026, 10, 4, 0, 0, 0, 0, time.UTC) }
@@ -100,7 +101,7 @@ func TestAllGood(t *testing.T) {
 	if fails != 0 {
 		t.Fatalf("unexpected failures:\n%s", out)
 	}
-	for _, want := range []string{"config", "port", "global token valid", "repo o/api reachable", "unit api.service found, User=shipit", "sudoers allows restart", "writable"} {
+	for _, want := range []string{"config", "webhook running on", "global token valid", "repo o/api reachable", "unit api.service found, User=shipit", "sudoers allows restart", "writable"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output lacks %q:\n%s", want, out)
 		}
@@ -225,11 +226,25 @@ func TestGlobalWarnings(t *testing.T) {
 		t.Errorf("warned although the project has a token:\n%s", out)
 	}
 
-	c := r.checker(t, secret, true)
-	c.Listen = func(string) error { return errors.New("address already in use") }
-	out, fails = render(c.All(context.Background()))
-	if fails != 0 || !strings.Contains(out, "already in use") {
-		t.Errorf("listen conflict should only warn:\n%s", out)
+	for _, tc := range []struct {
+		name      string
+		state     PortState
+		listenErr error
+		want      string
+		fails     int
+	}{
+		{"shipit itself", PortShipit, nil, "webhook running on :9000 (shipit v1.2.0)", 0},
+		{"other program", PortOther, nil, "does not identify as shipit", 1},
+		{"nothing there", PortFree, nil, "webhook is not running", 0},
+		{"cannot bind", PortFree, errors.New("permission denied"), "cannot listen on :9000: permission denied", 1},
+	} {
+		c := r.checker(t, secret, true)
+		c.Probe = func(context.Context, string) (PortState, string) { return tc.state, "v1.2.0" }
+		c.Listen = func(string) error { return tc.listenErr }
+		out, fails = render(c.All(context.Background()))
+		if fails != tc.fails || !strings.Contains(out, tc.want) {
+			t.Errorf("%s: fails=%d, want %d, output:\n%s", tc.name, fails, tc.fails, out)
+		}
 	}
 }
 

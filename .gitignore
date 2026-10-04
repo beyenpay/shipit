@@ -1,5 +1,6 @@
 # Local notes (may contain server addresses)
 tips.md
+_dev
 
 # Real configuration and secrets. Only examples/ is meant to be committed.
 /shipit.yaml
