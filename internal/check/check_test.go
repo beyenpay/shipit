@@ -233,10 +233,10 @@ func TestGlobalWarnings(t *testing.T) {
 		want      string
 		fails     int
 	}{
-		{"shipit itself", PortShipit, nil, "webhook running on :9000 (shipit v1.2.0)", 0},
+		{"shipit itself", PortShipit, nil, "webhook running on :7447 (shipit v1.2.0)", 0},
 		{"other program", PortOther, nil, "does not identify as shipit", 1},
 		{"nothing there", PortFree, nil, "webhook is not running", 0},
-		{"cannot bind", PortFree, errors.New("permission denied"), "cannot listen on :9000: permission denied", 1},
+		{"cannot bind", PortFree, errors.New("permission denied"), "cannot listen on :7447: permission denied", 1},
 	} {
 		c := r.checker(t, secret, true)
 		c.Probe = func(context.Context, string) (PortState, string) { return tc.state, "v1.2.0" }

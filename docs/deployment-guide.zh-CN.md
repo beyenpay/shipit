@@ -11,7 +11,7 @@
 - Linux 服务器（推荐 Debian/Ubuntu），amd64 或 arm64 架构
 - root 权限（或有 `sudo` 的用户）
 - 可对外访问 GitHub 的 HTTPS（443 端口）
-- 一个用于 webhook 的入站 TCP 端口（默认 `9000`）
+- 一个用于 webhook 的入站 TCP 端口（默认 `7447`）
 
 ### 1.2 运行安装脚本
 
@@ -49,7 +49,7 @@ sudo -u shipit vi /etc/shipit/shipit.yaml
 最简配置（项目在第二部分添加）：
 
 ```yaml
-listen: :9000
+listen: :7447
 secret: <随机生成 — 除非需要轮换，否则不要修改>
 ```
 
@@ -65,7 +65,7 @@ token: github_pat_...
 
 ```bash
 # ufw 示例
-sudo ufw allow 9000/tcp
+sudo ufw allow 7447/tcp
 ```
 
 GitHub runner 的 IP 段可在
@@ -168,7 +168,7 @@ sudo shipit check
 
 | Secret 名称 | 值 |
 |-------------|-----|
-| `SHIPIT_URL` | `http://<服务器IP>:9000` |
+| `SHIPIT_URL` | `http://<服务器IP>:7447` |
 | `SHIPIT_SECRET` | `/etc/shipit/shipit.yaml` 中的 `secret` 值 |
 
 私有仓库还需添加：

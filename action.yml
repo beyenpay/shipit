@@ -4,7 +4,7 @@ author: beyenpay
 
 inputs:
   url:
-    description: Base URL of the shipit webhook, e.g. http://203.0.113.10:9000
+    description: Base URL of the shipit webhook, e.g. http://203.0.113.10:7447
     required: true
   secret:
     description: Shared webhook secret (the `secret` in shipit.yaml).

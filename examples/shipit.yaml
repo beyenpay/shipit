@@ -4,7 +4,7 @@
 # the webhook re-reads this file on every request. Changing `listen` needs
 # `sudo systemctl restart shipit`.
 
-listen: ":9000"
+listen: ":7447"
 
 # Shared with CI (GitHub secret SHIPIT_SECRET). At least 16 characters.
 secret: "generated-by-install.sh"

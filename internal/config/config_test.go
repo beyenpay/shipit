@@ -27,7 +27,7 @@ func TestParseDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Listen != ":9000" {
+	if c.Listen != ":7447" {
 		t.Errorf("Listen = %q", c.Listen)
 	}
 	p := c.Projects["app"]
@@ -47,7 +47,7 @@ func TestParseEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Listen != ":9000" || len(c.Projects) != 0 {
+	if c.Listen != ":7447" || len(c.Projects) != 0 {
 		t.Errorf("unexpected config: %+v", c)
 	}
 }

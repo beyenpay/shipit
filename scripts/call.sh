@@ -2,10 +2,10 @@
 # Calls a shipit webhook, waits for the job to finish and mirrors its result in
 # the exit code. Used by action.yml, and handy by hand:
 #
-#   SHIPIT_URL=http://host:9000 SHIPIT_SECRET=... SHIPIT_PROJECT=web SHIPIT_TAG=v1.2.3 scripts/call.sh
+#   SHIPIT_URL=http://host:7447 SHIPIT_SECRET=... SHIPIT_PROJECT=web SHIPIT_TAG=v1.2.3 scripts/call.sh
 #
 # Environment:
-#   SHIPIT_URL      base URL of the webhook, e.g. http://203.0.113.10:9000
+#   SHIPIT_URL      base URL of the webhook, e.g. http://203.0.113.10:7447
 #   SHIPIT_SECRET   shared secret (same as `secret:` in shipit.yaml)
 #   SHIPIT_PROJECT  project name from shipit.yaml
 #   SHIPIT_TAG      release tag (required for deploy, optional for rollback)

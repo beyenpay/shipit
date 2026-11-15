@@ -11,7 +11,7 @@ A step-by-step guide for getting shipit running on a fresh server and adding you
 - A Linux server (Debian/Ubuntu recommended), amd64 or arm64
 - Root access (or a user with `sudo`)
 - Outbound HTTPS to GitHub (port 443)
-- One inbound TCP port for the webhook (default `9000`)
+- One inbound TCP port for the webhook (default `7447`)
 
 ### 1.2 Run the installer
 
@@ -49,7 +49,7 @@ sudo -u shipit vi /etc/shipit/shipit.yaml
 Minimal config (projects added in Part 2):
 
 ```yaml
-listen: :9000
+listen: :7447
 secret: <randomly generated — do not change unless rotating>
 ```
 
@@ -66,7 +66,7 @@ or from anywhere if you rely on HMAC signing alone:
 
 ```bash
 # ufw example
-sudo ufw allow 9000/tcp
+sudo ufw allow 7447/tcp
 ```
 
 GitHub's runner IP ranges are published at
@@ -169,7 +169,7 @@ In the project repository on GitHub → Settings → Secrets and variables → A
 
 | Secret name | Value |
 |-------------|-------|
-| `SHIPIT_URL` | `http://<server-ip>:9000` |
+| `SHIPIT_URL` | `http://<server-ip>:7447` |
 | `SHIPIT_SECRET` | the `secret` value from `/etc/shipit/shipit.yaml` |
 
 For a private repository, also add:

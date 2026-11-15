@@ -82,7 +82,7 @@ curl -fsSL https://raw.githubusercontent.com/beyenpay/shipit/main/install.sh | s
 然后：
 
 1. 编辑配置：`sudo -u shipit vi /etc/shipit/shipit.yaml`
-2. 在防火墙中开放 webhook 端口（默认 `9000/tcp`）。
+2. 在防火墙中开放 webhook 端口（默认 `7447/tcp`）。
 3. 添加项目（见下文）。
 4. 运行 `sudo shipit check`。
 
@@ -186,7 +186,7 @@ sudo systemctl reload nginx
 ## 连接 GitHub
 
 在每个项目仓库中添加两个 Secret：
-`SHIPIT_URL`（例如 `http://203.0.113.10:9000`）和 `SHIPIT_SECRET`（配置文件中的 `secret`）。
+`SHIPIT_URL`（例如 `http://203.0.113.10:7447`）和 `SHIPIT_SECRET`（配置文件中的 `secret`）。
 然后从 [`examples/workflows`](examples/workflows) 复制对应的 workflow 文件
 （`go.yml`、`vite.yml` 或 `next.yml`）到 `.github/workflows/release.yml`，
 修改顶部的两三个变量即可。
@@ -244,7 +244,7 @@ shipit check [-offline]        # 验证全部配置
 
 | 键 | | |
 |---|---|---|
-| `listen` | 可选 | webhook 监听地址，默认 `:9000` |
+| `listen` | 可选 | webhook 监听地址，默认 `:7447` |
 | `secret` | serve 时必填 | 与 CI 共享，至少 16 个字符 |
 | `token` | 可选 | GitHub token，所有项目的默认值 |
 | `projects.<name>.type` | 必填 | `go`、`vite` 或 `next` |

@@ -30,7 +30,7 @@ const (
 )
 
 const (
-	DefaultListen        = ":9000"
+	DefaultListen        = ":7447"
 	DefaultKeep          = 5
 	MinKeep              = 2 // current + previous are always kept
 	DefaultHealthTimeout = 30 * time.Second

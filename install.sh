@@ -60,7 +60,7 @@ write_config() { # secret
 # Changes to "projects" apply to the next request, no restart needed.
 # Changing "listen" needs:     sudo systemctl restart shipit
 
-listen: ":9000"
+listen: ":7447"
 
 # Shared with CI. Put the same value into the SHIPIT_SECRET GitHub secret.
 secret: "$1"
@@ -162,7 +162,7 @@ Next steps:
   1. Edit the config:   sudo -u $USER_NAME vi $CONF
        - add projects, and a GitHub token if you deploy private repositories
        - the webhook secret is already set; copy it into the SHIPIT_SECRET GitHub secret
-  2. Open the webhook port (default 9000/tcp) in your firewall.
+  2. Open the webhook port (default 7447/tcp) in your firewall.
   3. Create each project's directory (owned by $USER_NAME), its systemd unit
      (User=$USER_NAME, WorkingDirectory=<dir>/current) and a sudoers line:
        $USER_NAME ALL=(root) NOPASSWD: /usr/bin/systemctl restart <service>

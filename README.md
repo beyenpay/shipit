@@ -85,7 +85,7 @@ Running it again upgrades the binary and keeps your config. Pin a version with
 Then:
 
 1. Edit the config: `sudo -u shipit vi /etc/shipit/shipit.yaml`
-2. Open the webhook port (default `9000/tcp`) in your firewall.
+2. Open the webhook port (default `7447/tcp`) in your firewall.
 3. Add your projects (below).
 4. Run `sudo shipit check`.
 
@@ -197,7 +197,7 @@ mode `0600` (owner-only), so nginx cannot read it even as a group member.
 ## Connect GitHub
 
 In each project repository add two secrets: `SHIPIT_URL` (for example
-`http://203.0.113.10:9000`) and `SHIPIT_SECRET` (the `secret` from the config).
+`http://203.0.113.10:7447`) and `SHIPIT_SECRET` (the `secret` from the config).
 Then copy a workflow from [`examples/workflows`](examples/workflows)
 (`go.yml`, `vite.yml` or `next.yml`) to `.github/workflows/release.yml` and
 change the two or three values at its top.
@@ -255,7 +255,7 @@ from the Actions tab.
 
 | key | | |
 |---|---|---|
-| `listen` | optional | address of the webhook, default `:9000` |
+| `listen` | optional | address of the webhook, default `:7447` |
 | `secret` | required to serve | shared with CI, at least 16 characters |
 | `token` | optional | GitHub token, default for all projects |
 | `projects.<name>.type` | required | `go`, `vite` or `next` |
