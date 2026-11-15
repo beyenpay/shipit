@@ -3,6 +3,9 @@
 # Create the project once:
 #   sudo mkdir -p /srv/app/beyen-home/web/shared
 #   sudo chown -R shipit:shipit /srv/app/beyen-home
+#   sudo chmod 750 /srv/app/beyen-home        # deny local users outside the shipit group
+#   sudo -u shipit touch /srv/app/beyen-home/web/shared/.env
+#   sudo chmod 600 /srv/app/beyen-home/web/shared/.env   # owner-only; shipit webhook must not leak it
 #   sudo -u shipit vi /srv/app/beyen-home/web/shared/.env
 #   sudo systemctl daemon-reload && sudo systemctl enable beyen-home
 # (do not start it: <dir>/current does not exist until the first deploy)

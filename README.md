@@ -1,5 +1,7 @@
 # shipit
 
+[中文](README.zh-CN.md)
+
 Pull-based deploys from GitHub Releases for Go, Vite and Next.js projects on a
 plain Linux server. One static binary, one config file, one user, no Docker.
 
@@ -125,6 +127,13 @@ and an update needs root. Re-running
 `install.sh` also upgrades, and is the way to get `self-update` the first time
 on a version that predates it.
 
+> **Supply chain trust**: `self-update` and `install.sh` verify the downloaded
+> binary against `checksums.txt` from the same GitHub release. This protects
+> against network interception but not against a compromised release. Protect the
+> `beyenpay/shipit` repository's tag and release permissions. In
+> security-sensitive environments, pin `SHIPIT_VERSION` and review the binary
+> before upgrading.
+
 ## Add a project
 
 Example: a Next.js site called `beyen-home`. Samples for every step are in [`examples/`](examples).
@@ -146,7 +155,11 @@ projects:
 ```bash
 sudo mkdir -p /srv/app/beyen-home/web/shared
 sudo chown -R shipit:shipit /srv/app/beyen-home
-sudo -u shipit vi /srv/app/beyen-home/web/shared/.env      # optional
+sudo chmod 750 /srv/app/beyen-home
+# Optional: create the shared .env as owner-only before filling it in.
+sudo -u shipit touch /srv/app/beyen-home/web/shared/.env
+sudo chmod 600 /srv/app/beyen-home/web/shared/.env
+sudo -u shipit vi /srv/app/beyen-home/web/shared/.env
 ```
 
 **3. Systemd unit** (`/etc/systemd/system/beyen-home.service`): see
@@ -169,6 +182,17 @@ repository not reachable, token expiring).
 
 Vite projects need only steps 1 and 2: point nginx at `<dir>/current`. The
 switch is atomic, no reload needed.
+
+Because the project directory is mode `0750`, nginx needs to be in the `shipit`
+group to read the deployed files:
+
+```bash
+sudo usermod -aG shipit www-data   # nginx on Debian/Ubuntu; adjust the user name for other distros
+sudo systemctl reload nginx
+```
+
+This gives nginx group-read access to the deployed files. The `shared/.env` is
+mode `0600` (owner-only), so nginx cannot read it even as a group member.
 
 ## Connect GitHub
 
@@ -283,8 +307,9 @@ state of the project is always visible with `shipit status`.
 - **Signed requests**: HMAC over the method, path, timestamp and body. Timestamps must be within 5 minutes, and a signature is accepted once, so a captured request cannot be replayed or redirected to another endpoint. The secret is not sent over the wire, which matters because the webhook is plain HTTP by default. Put a TLS proxy in front, or set up a firewall rule for GitHub's runners, if you want to hide request contents too.
 - **Rate limits**, per client IP: 10 requests/s (burst 20), and an IP with 10 failed authentications in a minute is locked out for the rest of that minute. A global limit would let anyone lock CI out, so it is per IP.
 - **Release integrity**: every package is checked against `checksums.txt`; archives are unpacked with strict path and symlink rules, size limits, and no overwriting. This protects against corruption, not against someone who can publish releases to your repository: that access is the real security boundary.
-- **One user** runs shipit and the projects. Systemd units must say `User=shipit`; `shipit check` fails a unit that would run as root. The only root capability is the exact `sudo systemctl restart <service>` lines you add.
+- **One user** runs shipit and the projects. Systemd units must say `User=shipit`; `shipit check` fails a unit that would run as root. At deploy time, `shipit` also verifies this via `systemctl show` before issuing the restart: a unit misconfigured to run as root is refused, so the guarantee holds even without running `check` first. The only root capability is the exact `sudo systemctl restart <service>` lines you add.
 - **Secrets**: the config (secret and tokens) must be mode `0600`; shipit refuses to serve otherwise.
+- **Project directories** should be mode `0750` (owner `shipit`, no world access). Static sites served by nginx require nginx's system user in the `shipit` group; the `shared/.env` is mode `0600` so it stays private even then. shipit itself does not enforce these modes on directories it did not create, so set them when you provision a project.
 - The webhook shuts down gracefully: a deploy in progress finishes before the process exits.
 
 Because a single user owns both the webhook and the projects, compromising

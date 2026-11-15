@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/beyenpay/shipit/internal/config"
+	"github.com/beyenpay/shipit/internal/identity"
 )
 
 const (
@@ -22,9 +23,26 @@ const (
 // SystemctlRestart restarts a service with `sudo -n systemctl restart`. The
 // command is fixed and run without a shell; sudoers must allow exactly this
 // command for this service.
+//
+// Before issuing the restart it verifies that the unit runs as the shipit user.
+// A unit misconfigured to run as root would let a malicious release gain root
+// execution through the restart; refusing early makes that impossible even if
+// the sudoers rule and the unit file are both present but the User= line is
+// wrong. systemctl show does not need sudo.
 func SystemctlRestart(ctx context.Context, service string) error {
 	if service == "" || strings.HasPrefix(service, "-") {
 		return fmt.Errorf("invalid service name %q", service)
+	}
+	show, err := exec.CommandContext(ctx, SystemctlPath, "show", service, "-p", "User").Output()
+	if err != nil {
+		return fmt.Errorf("cannot inspect unit %s before restart: %w", service, err)
+	}
+	u := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(string(show)), "User="))
+	switch {
+	case u == "":
+		return fmt.Errorf("unit %s has no User= set (would run as root); add User=%s to the unit file and run systemctl daemon-reload", service, identity.ServiceUser)
+	case u != identity.ServiceUser:
+		return fmt.Errorf("unit %s runs as %q, not %q; set User=%s in the unit file and run systemctl daemon-reload", service, u, identity.ServiceUser, identity.ServiceUser)
 	}
 	out, err := exec.CommandContext(ctx, sudoBin, "-n", SystemctlPath, "restart", service).CombinedOutput()
 	if err != nil {

@@ -2,6 +2,10 @@
 #
 #   sudo mkdir -p /srv/app/beyen-api/shared
 #   sudo chown -R shipit:shipit /srv/app/beyen-api
+#   sudo chmod 750 /srv/app/beyen-api         # deny local users outside the shipit group
+#   sudo -u shipit touch /srv/app/beyen-api/shared/.env
+#   sudo chmod 600 /srv/app/beyen-api/shared/.env        # owner-only
+#   sudo -u shipit vi /srv/app/beyen-api/shared/.env
 #   sudo systemctl daemon-reload && sudo systemctl enable beyen-api
 
 [Unit]
