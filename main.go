@@ -330,7 +330,7 @@ func cmdStatus(cfgPath string) int {
 	defer cancel()
 
 	tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "PROJECT\tCURRENT\tPREVIOUS\tSERVICE")
+	fmt.Fprintln(tw, "PROJECT\tCURRENT\tPREVIOUS\tSERVICE\tRUNNER")
 	code := 0
 	for _, name := range d.Cfg.Names() {
 		p := d.Cfg.Projects[name]
@@ -340,11 +340,12 @@ func cmdStatus(cfgPath string) int {
 			code = 1
 			continue
 		}
-		svc := "-"
+		svc, runner := "-", "-"
 		if p.Service != "" {
 			svc = deploy.ServiceState(ctx, p.Service)
+			runner = deploy.RunnerLabel(deploy.Runner(ctx, p.Service))
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", name, dash(st.Current), dash(st.Previous), svc)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", name, dash(st.Current), dash(st.Previous), svc, runner)
 	}
 	tw.Flush()
 	return code
@@ -380,7 +381,7 @@ Commands:
   deploy <project> [tag]     deploy a release (default: latest)
   rollback <project> [tag]   switch back to the previous (or given) version
   list <project>             list local releases
-  status                     show the current version of every project
+  status                     show version, service state and run-as account of every project
   serve                      run the webhook server
   check [-offline]           validate config, systemd units, sudoers, GitHub access
   uninstall [flags]          remove shipit (-purge, -delete-projects, -y, -dry-run)

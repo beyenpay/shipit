@@ -3,9 +3,11 @@ package release
 import (
 	"archive/tar"
 	"compress/gzip"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -159,5 +161,123 @@ func TestExtractNotGzip(t *testing.T) {
 	}
 	if err := Extract(p, filepath.Join(t.TempDir(), "out")); err == nil {
 		t.Error("expected error")
+	}
+}
+
+func TestGroupAccess(t *testing.T) {
+	tests := []struct{ in, want fs.FileMode }{
+		{0o700, 0o750},
+		{0o600, 0o640},
+		{0o500, 0o550},
+		{0o400, 0o440},
+		{0o755, 0o755},
+		{0o644, 0o644},
+		{0o705, 0o755}, // other bits are left alone
+		{0o200, 0o200}, // nothing to share
+		{0o000, 0o000},
+	}
+	for _, tt := range tests {
+		if got := groupAccess(tt.in); got != tt.want {
+			t.Errorf("groupAccess(%04o) = %04o, want %04o", tt.in, got, tt.want)
+		}
+	}
+}
+
+// setUmask changes the umask for one test.
+func setUmask(t *testing.T, mask int) {
+	t.Helper()
+	old := syscall.Umask(mask)
+	t.Cleanup(func() { syscall.Umask(old) })
+}
+
+func TestExtractGroupCanReadAndRun(t *testing.T) {
+	// A strict umask must not take the group's access away, and an archive
+	// built with private modes must still be usable by the service account.
+	setUmask(t, 0o077)
+	arc := mktar(t, []ent{
+		{name: "./", typ: tar.TypeDir, mode: 0o700},
+		{name: "app", body: "bin", mode: 0o700},
+		{name: "secret.txt", body: "x", mode: 0o600},
+		{name: "private/", typ: tar.TypeDir, mode: 0o700},
+		{name: "private/data", body: "y", mode: 0o600},
+		{name: "implicit/dir/file", body: "z", mode: 0o644},
+	})
+	dest := filepath.Join(t.TempDir(), "rel", "out")
+	if err := Extract(arc, dest); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]fs.FileMode{
+		"":                  0o755, // dest and its created parents
+		"app":               0o750,
+		"secret.txt":        0o640,
+		"private":           0o750,
+		"private/data":      0o640,
+		"implicit":          0o755,
+		"implicit/dir":      0o755,
+		"implicit/dir/file": 0o644,
+	}
+	for rel, mode := range want {
+		fi, err := os.Stat(filepath.Join(dest, rel))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := fi.Mode().Perm(); got != mode {
+			t.Errorf("%q has mode %04o, want %04o", rel, got, mode)
+		}
+	}
+	// The parent that Extract had to create must be reachable as well.
+	if fi, err := os.Stat(filepath.Dir(dest)); err != nil || fi.Mode().Perm() != 0o755 {
+		t.Errorf("created parent of dest: %v %v", fi, err)
+	}
+}
+
+func TestMkdirAllKeepsExistingAndSetgid(t *testing.T) {
+	setUmask(t, 0o077)
+	base := t.TempDir()
+	if err := os.Chmod(base, 0o750|fs.ModeSetgid); err != nil {
+		t.Fatal(err)
+	}
+
+	// An existing directory is never touched.
+	if err := MkdirAll(base, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if fi, _ := os.Stat(base); fi.Mode().Perm() != 0o750 || fi.Mode()&fs.ModeSetgid == 0 {
+		t.Errorf("existing directory changed: %v", fi.Mode())
+	}
+
+	// A directory that inherits setgid keeps it; where the OS does not
+	// inherit it, there is nothing to keep.
+	probe := filepath.Join(base, "probe")
+	if err := os.Mkdir(probe, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	inherits := func() bool { fi, _ := os.Stat(probe); return fi.Mode()&fs.ModeSetgid != 0 }()
+
+	deep := filepath.Join(base, "a", "b")
+	if err := MkdirAll(deep, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range []string{filepath.Join(base, "a"), deep} {
+		fi, err := os.Stat(d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fi.Mode().Perm() != 0o755 {
+			t.Errorf("%s has mode %04o, want 0755", d, fi.Mode().Perm())
+		}
+		if inherits && fi.Mode()&fs.ModeSetgid == 0 {
+			t.Errorf("%s lost the setgid bit", d)
+		}
+	}
+}
+
+func TestMkdirAllErrors(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(f, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := MkdirAll(filepath.Join(f, "sub"), 0o755); err == nil {
+		t.Error("creating a directory below a regular file must fail")
 	}
 }

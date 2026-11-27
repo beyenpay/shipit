@@ -8,11 +8,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -50,11 +52,16 @@ type Checker struct {
 	Cfg     *config.Config
 	Path    string
 	Offline bool
-	// User is the account the project services must run as.
+	// User is the account shipit itself runs as. A service that also runs as
+	// it is flagged, since all such services share one trust boundary.
 	User string
 
 	// The fields below exist so tests can replace the outside world.
-	Run    func(ctx context.Context, name string, args ...string) (string, error)
+	Run func(ctx context.Context, name string, args ...string) (string, error)
+	// Open tries to open a file for reading as the current user.
+	Open func(path string) error
+	// Runner decides whether a unit's User= is acceptable.
+	Runner func(user string) error
 	Probe  func(ctx context.Context, addr string) (PortState, string)
 	Listen func(addr string) error
 	Remote func(token string) Remote
@@ -65,11 +72,23 @@ func New(cfg *config.Config, path string, offline bool) *Checker {
 	return &Checker{
 		Cfg: cfg, Path: path, Offline: offline, User: "shipit",
 		Run:    run,
+		Open:   canOpen,
+		Runner: deploy.ValidateRunner,
 		Probe:  probePort,
 		Listen: tryListen,
 		Remote: func(token string) Remote { return release.NewClient(token) },
 		Now:    time.Now,
 	}
+}
+
+// canOpen reports whether the current user can open path for reading. It
+// never blocks, even on a FIFO, and reads nothing.
+func canOpen(path string) error {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return err
+	}
+	return f.Close()
 }
 
 func run(ctx context.Context, name string, args ...string) (string, error) {
@@ -261,11 +280,11 @@ func (c *Checker) dir(b *builder, p *config.Project) {
 	b.add(OK, "dir %s writable", p.Dir)
 }
 
-// unit verifies the hand-written systemd unit: it exists, runs as the shipit
-// user (never root, since shipit can write the code it executes) and starts in
-// <dir>/current.
+// unit verifies the hand-written systemd unit: it exists, does not run as root
+// (shipit can write the code it executes), starts in <dir>/current, and keeps
+// its environment files out of shipit's reach.
 func (c *Checker) unit(ctx context.Context, b *builder, p *config.Project) {
-	out, err := c.Run(ctx, "systemctl", "show", p.Service, "-p", "LoadState", "-p", "User", "-p", "WorkingDirectory")
+	out, err := c.Run(ctx, "systemctl", "show", p.Service, "-p", "LoadState", "-p", "User", "-p", "WorkingDirectory", "-p", "EnvironmentFiles")
 	if err != nil {
 		b.add(Fail, "cannot query systemd for %q: %v", p.Service, err)
 		return
@@ -280,19 +299,66 @@ func (c *Checker) unit(ctx context.Context, b *builder, p *config.Project) {
 		b.add(Fail, "unit %s.service not found (LoadState=%s)", p.Service, props["LoadState"])
 		return
 	}
-	switch u := props["User"]; u {
-	case c.User:
+	u := props["User"]
+	if err := c.Runner(u); err != nil {
+		b.add(Fail, "unit %s.service: %v; set User= to a non-root account (ideally one of its own)", p.Service, err)
+	} else {
 		b.add(OK, "unit %s.service found, User=%s", p.Service, u)
-	case "":
-		b.add(Fail, "unit %s.service has no User= and would run as root; set User=%s", p.Service, c.User)
-	default:
-		b.add(Fail, "unit %s.service runs as %q, expected %q", p.Service, u, c.User)
+		if u == c.User {
+			b.add(Warn, "unit %s.service runs as %s, like shipit and every other project that does: one compromised service can reach them all; give it its own user (see docs/deployment-guide.md)", p.Service, u)
+		}
 	}
 	want := filepath.Join(p.Dir, "current")
 	if got := props["WorkingDirectory"]; filepath.Clean(got) != want {
 		b.add(Fail, "unit WorkingDirectory=%s, expected %s", got, want)
 	} else {
 		b.add(OK, "WorkingDirectory=%s", got)
+	}
+	c.envFiles(b, p, props["EnvironmentFiles"])
+}
+
+// envFileRe matches one entry of `systemctl show -p EnvironmentFiles`, which
+// lists "<path> (ignore_errors=yes|no)" entries separated by spaces. The path
+// is matched lazily so that a path containing spaces still parses.
+var envFileRe = regexp.MustCompile(`\s*(.+?) \(ignore_errors=(yes|no)\)`)
+
+// envFiles warns about every EnvironmentFile= of the unit that this user can
+// read. They hold the service's secrets, and shipit does not need them: systemd
+// reads them as root before it starts the service. A file shipit can read leaks
+// as soon as shipit (or its webhook) is compromised.
+func (c *Checker) envFiles(b *builder, p *config.Project, value string) {
+	for _, m := range envFileRe.FindAllStringSubmatch(value, -1) {
+		paths := []string{m[1]}
+		if strings.ContainsAny(m[1], "*?[") { // systemd accepts globs here
+			matches, err := filepath.Glob(m[1])
+			if err != nil || len(matches) == 0 {
+				continue
+			}
+			paths = matches
+		}
+		for _, path := range paths {
+			c.envFile(b, p, path, m[2] == "yes")
+		}
+	}
+}
+
+func (c *Checker) envFile(b *builder, p *config.Project, path string, optional bool) {
+	err := c.Open(path)
+	switch {
+	case err == nil:
+		where := ""
+		if rel, err := filepath.Rel(p.Dir, path); err == nil && rel != ".." && !strings.HasPrefix(rel, "../") {
+			where = " (inside the project directory)"
+		}
+		b.add(Warn, "env file %s%s can be read by %s: a compromise of shipit would leak it; move it out of reach, e.g. /etc/%s/.env owned by root, mode 0600", path, where, c.User, p.Service)
+	case errors.Is(err, fs.ErrPermission):
+		b.add(OK, "env file %s is not readable by %s", path, c.User)
+	case errors.Is(err, fs.ErrNotExist):
+		if !optional {
+			b.add(Warn, "env file %s does not exist, so the service cannot start", path)
+		}
+	default:
+		b.add(Warn, "env file %s: %v", path, err)
 	}
 }
 

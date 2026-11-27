@@ -3,7 +3,7 @@
 [中文](README.zh-CN.md)
 
 Pull-based deploys from GitHub Releases for Go, Vite and Next.js projects on a
-plain Linux server. One static binary, one config file, one user, no Docker.
+plain Linux server. One static binary, one config file, no Docker.
 
 Push a tag. CI builds and publishes a release, calls the shipit webhook on your
 server, and waits. shipit downloads the release, verifies it, switches a
@@ -18,7 +18,7 @@ itself if it is not. The CI job turns green or red with the real outcome.
 - **Health-checked**: an optional health URL is polled after the restart; a failing release is replaced by the previous one automatically.
 - **Public and private repositories**: a GitHub token is only needed for private ones.
 - **Both architectures**: releases carry `amd64` and `arm64` packages; each server picks its own.
-- **Minimal privileges**: one `shipit` user, and sudo for exactly `systemctl restart <service>`, nothing else.
+- **Minimal privileges**: shipit only deploys. Every service runs as its own account, out of shipit's reach (it cannot read their secrets or data), and shipit has sudo for exactly `systemctl restart <service>`, nothing else.
 - **Small surface**: one YAML file. Systemd units, sudoers and nginx stay yours, in the usual places.
 
 ## How it works
@@ -45,8 +45,10 @@ On disk, per project:
   releases/v1.1.0/  releases/v1.2.0/
   current  -> releases/v1.2.0       what is live
   previous -> releases/v1.1.0       what `rollback` returns to
-  shared/.env                       yours; shipit never touches it
 ```
+
+Nothing else lives there. Configuration goes to `/etc/<service>`, data and logs to
+`/var/lib/<service>` and `/var/log/<service>` (see [Add a project](#add-a-project)).
 
 The two symlinks are the only state shipit keeps. There is no database and no
 state file that could disagree with reality.
@@ -150,21 +152,43 @@ projects:
     health: http://127.0.0.1:8012/
 ```
 
-**2. Directory:**
+**2. Accounts and directories.** shipit deploys; the service runs as an account
+of its own. Each kind of file has one place and one owner:
+
+| path | holds | owner : mode |
+|---|---|---|
+| `/srv/app/beyen-home/web` | `releases/`, `current`, `previous`: all shipit touches | `shipit:svc-beyen-home` `2750` |
+| `/etc/beyen-home` | `.env`, config files | `root:svc-beyen-home` `0750` |
+| `/etc/beyen-home/.env` | the secrets | `root:root` `0600` |
+| `/var/lib/beyen-home`, `/var/log/beyen-home` | data and logs | created by systemd, owned by the service account |
 
 ```bash
-sudo mkdir -p /srv/app/beyen-home/web/shared
-sudo chown -R shipit:shipit /srv/app/beyen-home
-sudo chmod 750 /srv/app/beyen-home
-# Optional: create the shared .env as owner-only before filling it in.
-sudo -u shipit touch /srv/app/beyen-home/web/shared/.env
-sudo chmod 600 /srv/app/beyen-home/web/shared/.env
-sudo -u shipit vi /srv/app/beyen-home/web/shared/.env
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin svc-beyen-home
+sudo mkdir -p /srv/app/beyen-home/web
+sudo chown shipit:svc-beyen-home /srv/app/beyen-home/web
+sudo chmod 2750 /srv/app/beyen-home/web       # setgid: every new release inherits the group
+sudo install -d -o root -g svc-beyen-home -m 750 /etc/beyen-home
+sudo touch /etc/beyen-home/.env && sudo chmod 600 /etc/beyen-home/.env
+sudo vi /etc/beyen-home/.env
 ```
 
+Why: shipit can write the code, but the service can only read it, so a
+compromised service cannot plant code that survives a restart. The service
+cannot see other services, and shipit cannot see any service's secrets:
+systemd reads `EnvironmentFile=` as root, before it starts the service. If the
+program opens its `.env` itself instead of reading environment variables, use
+`root:svc-beyen-home` `0640` for that file. Directories above `dir`
+(`/srv/app`, `/srv/app/beyen-home`) should belong to root, so shipit cannot
+swap the project directory.
+
+The program must write only to `/var/lib/beyen-home` and `/var/log/beyen-home`
+(or log to stdout, which journald collects), never into its own directory.
+
 **3. Systemd unit** (`/etc/systemd/system/beyen-home.service`): see
-[`examples/systemd`](examples/systemd). It must run as `User=shipit` and use
-`WorkingDirectory=<dir>/current`. Enable it, but do not start it yet:
+[`examples/systemd`](examples/systemd). It needs `User=svc-beyen-home` (any
+non-root account that is not shared with other services), `WorkingDirectory=<dir>/current`,
+`EnvironmentFile=/etc/beyen-home/.env`, and `StateDirectory=`/`LogsDirectory=` so systemd
+creates the data and log directories. Enable it, but do not start it yet:
 
 ```bash
 sudo systemctl daemon-reload && sudo systemctl enable beyen-home
@@ -177,22 +201,25 @@ shipit ALL=(root) NOPASSWD: /usr/bin/systemctl restart beyen-home
 ```
 
 **5. Verify:** `sudo shipit check` tells you what is still missing
-(unit not found, wrong user, wrong working directory, sudoers rule absent,
-repository not reachable, token expiring).
+(unit not found, running as root, wrong working directory, sudoers rule absent,
+repository not reachable, token expiring) and warns about an `EnvironmentFile=`
+that the shipit user can read, or a service that still runs as `shipit`.
+`shipit status` shows the account every service runs as.
 
-Vite projects need only steps 1 and 2: point nginx at `<dir>/current`. The
-switch is atomic, no reload needed.
+Projects that still run as `shipit` and keep `shared/.env` in the project
+directory keep working, but they share one trust boundary with shipit and with
+each other. `shipit status` marks them with `!`. To move one over, see
+[docs/deployment-guide.md](docs/deployment-guide.md#migrating-an-existing-project).
 
-Because the project directory is mode `0750`, nginx needs to be in the `shipit`
-group to read the deployed files:
+Vite projects need only steps 1 and 2, without a service account: point nginx
+at `<dir>/current`. The switch is atomic, no reload needed. Give the directory
+to nginx's group so it can read the files:
 
 ```bash
-sudo usermod -aG shipit www-data   # nginx on Debian/Ubuntu; adjust the user name for other distros
-sudo systemctl reload nginx
+sudo mkdir -p /srv/app/beyen-web
+sudo chown shipit:www-data /srv/app/beyen-web   # www-data on Debian/Ubuntu; adjust for other distros
+sudo chmod 2750 /srv/app/beyen-web
 ```
-
-This gives nginx group-read access to the deployed files. The `shared/.env` is
-mode `0600` (owner-only), so nginx cannot read it even as a group member.
 
 ## Connect GitHub
 
@@ -226,7 +253,7 @@ git tag v1.2.0 && git push --tags      # build, release, deploy
 On the server (as root, or prefix with `sudo`):
 
 ```bash
-shipit status                  # current / previous version and service state of every project
+shipit status                  # version, service state and run-as account of every project (`!` marks shipit and root)
 shipit list beyen-home         # releases on disk
 shipit deploy beyen-home       # deploy the latest GitHub release
 shipit deploy beyen-home v1.2.0  # a specific one (no download if it is already on disk)
@@ -307,14 +334,17 @@ state of the project is always visible with `shipit status`.
 - **Signed requests**: HMAC over the method, path, timestamp and body. Timestamps must be within 5 minutes, and a signature is accepted once, so a captured request cannot be replayed or redirected to another endpoint. The secret is not sent over the wire, which matters because the webhook is plain HTTP by default. Put a TLS proxy in front, or set up a firewall rule for GitHub's runners, if you want to hide request contents too.
 - **Rate limits**, per client IP: 10 requests/s (burst 20), and an IP with 10 failed authentications in a minute is locked out for the rest of that minute. A global limit would let anyone lock CI out, so it is per IP.
 - **Release integrity**: every package is checked against `checksums.txt`; archives are unpacked with strict path and symlink rules, size limits, and no overwriting. This protects against corruption, not against someone who can publish releases to your repository: that access is the real security boundary.
-- **One user** runs shipit and the projects. Systemd units must say `User=shipit`; `shipit check` fails a unit that would run as root. At deploy time, `shipit` also verifies this via `systemctl show` before issuing the restart: a unit misconfigured to run as root is refused, so the guarantee holds even without running `check` first. The only root capability is the exact `sudo systemctl restart <service>` lines you add.
-- **Secrets**: the config (secret and tokens) must be mode `0600`; shipit refuses to serve otherwise.
-- **Project directories** should be mode `0750` (owner `shipit`, no world access). Static sites served by nginx require nginx's system user in the `shipit` group; the `shared/.env` is mode `0600` so it stays private even then. shipit itself does not enforce these modes on directories it did not create, so set them when you provision a project.
+- **One account per service.** shipit and each service run as different accounts. A unit needs a non-root `User=`; `shipit check` fails a unit that would run as root. Before every restart shipit also verifies this through `systemctl show` (the account must exist and must not be uid 0), so the guarantee holds even without running `check` first. The only root capability is the exact `sudo systemctl restart <service>` lines you add.
+- **Secrets stay out of shipit's reach.** `.env` and config files live in `/etc/<service>`, owned by root; systemd reads `EnvironmentFile=` as root. `shipit check` warns about every `EnvironmentFile=` that the shipit user can read, and `shipit status` marks services that still run as `shipit`.
+- **Config file**: the config (secret and tokens) must be mode `0600`; shipit refuses to serve otherwise.
+- **Project directories** are `shipit:<service group>`, mode `2750`: shipit writes, the service reads, nobody else gets in. shipit unpacks releases so that the group can always read and run them, whatever the umask or the modes inside the archive. It does not enforce modes on directories it did not create, so set them when you provision a project.
 - The webhook shuts down gracefully: a deploy in progress finishes before the process exits.
 
-Because a single user owns both the webhook and the projects, compromising
-shipit means compromising the deployed apps. The controls above exist to make
-that hard, not to separate the two.
+A compromised service no longer reaches the others: it can neither read their
+secrets nor change their code. A compromised shipit still can deploy code to
+every service it manages, since that is its job, but cannot read their secrets
+or data. Services that still run as `shipit` share one trust boundary with it
+and with each other, which is why `status` flags them.
 
 ## Uninstall
 
@@ -341,6 +371,8 @@ are only deleted when they look like shipit projects (a real directory with a
 | `built for EM_AARCH64 but this server is amd64` | wrong architecture packaged |
 | `missing .next/static` | the Next.js package was built without copying `.next/static` |
 | `sudo: a password is required` | the sudoers line is missing or does not match exactly |
+| `refusing to restart ...: unit runs as root` | the unit has no `User=` (or `User=root`); give it its own non-root account and `systemctl daemon-reload` |
+| the service fails with `Permission denied` on its files | the service account cannot read the release: the project directory must be owned by group `svc-<name>` with mode `2750`, and the files inside need the same group (`sudo chgrp -R`) |
 | `... rolled back to vX` | the new version failed its restart or health check; look at `journalctl -u <service>` |
 | `another operation is in progress` | a deploy for that project is already running |
 

@@ -22,16 +22,17 @@ sudo shipit check
 | GitHub token | Token is valid; warns if it expires within 14 days |
 | Project directory | Directory exists and is writable by the running user |
 | GitHub repository | Repo is reachable with the configured token |
-| Systemd unit | Unit is loaded; `User=shipit`; `WorkingDirectory=<dir>/current` |
+| Systemd unit | Unit is loaded; `User=` is set, exists and is not root (warns if it is `shipit` itself); `WorkingDirectory=<dir>/current` |
+| Environment files | Warns for every `EnvironmentFile=` of the unit that the shipit user can read |
 | Sudoers rule | `sudo -n systemctl restart <service>` is allowed without a password |
 
 **Gaps — things `shipit check` does not verify:**
 
-- Project directory mode (`0750` vs world-readable `0755`)
-- `shared/.env` existence and mode
+- Owner and mode of the project directory (`shipit:svc-<service>`, `2750`), and that the directories above it belong to root
+- Owner and mode of the files in `/etc/<service>/` other than the `EnvironmentFile=`s
 - `/etc/sudoers.d/shipit` file mode
 - Node.js runtime present (required for `type: next`)
-- `www-data` group membership (required for `type: vite` with nginx)
+- The project directory's group for `type: vite` with nginx
 - TLS / network exposure of the webhook port
 
 The manual steps below cover these gaps.
@@ -108,56 +109,74 @@ Repeat for every project added to `shipit.yaml`.
 PROJECT_DIR=/srv/app/beyen-home/web    # adjust per project
 
 stat "$PROJECT_DIR"
-stat "$PROJECT_DIR/shared"
+ls -ld /srv/app /srv/app/beyen-home    # the directories above it
 ```
 
-- [ ] Project directory — owner `shipit:shipit`, mode **`0750`** (not `0755`)
-- [ ] `shared/` subdirectory — owner `shipit:shipit`, mode **`0750`**
+- [ ] Project directory — owner `shipit:svc-<service>`, mode **`2750`** (the `2` is setgid)
+- [ ] Every directory above it (`/srv/app`, ...) — owner `root:root`
+- [ ] It holds only what shipit manages: `releases/`, `current`, `previous`, `.shipit.lock`
 
 ```bash
 # How to set it correctly
-sudo mkdir -p "$PROJECT_DIR/shared"
-sudo chown -R shipit:shipit "$PROJECT_DIR"
-sudo chmod 750 "$PROJECT_DIR"
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin svc-beyen-home
+sudo mkdir -p "$PROJECT_DIR"
+sudo chown shipit:svc-beyen-home "$PROJECT_DIR"
+sudo chmod 2750 "$PROJECT_DIR"
 ```
 
-> **Why 0750?** Mode `0755` lets every local user on the machine read your deployed source
-> code and traverse into `shared/`. `0750` limits access to the `shipit` group only.
+> **Why `shipit:svc-<service>` and `2750`?**
+> shipit writes the releases; the service account reads and runs them through
+> the group and cannot change them, so a compromised service cannot leave code
+> behind that survives a restart. Nobody else can enter. The setgid bit makes
+> every new release inherit the group. Root-owned parents stop shipit from
+> renaming or replacing the project directory.
 
-### 3.2 Shared `.env` file
+### 3.2 Configuration, data and logs
 
 ```bash
-stat "$PROJECT_DIR/shared/.env"
+sudo stat /etc/beyen-home /etc/beyen-home/.env
+sudo -u shipit cat /etc/beyen-home/.env      # must fail: Permission denied
 ```
 
-- [ ] `shared/.env` — owner `shipit:shipit`, mode **`0600`**
+- [ ] `/etc/<service>/` — owner `root:svc-<service>`, mode **`0750`**
+- [ ] `/etc/<service>/.env` — owner `root:root`, mode **`0600`** (or `root:svc-<service>` `0640` when the program opens the file itself)
+- [ ] Other config files (`config.yaml`, ...) — owner `root:svc-<service>`, mode **`0640`**: the service reads them but cannot change them
+- [ ] `sudo -u shipit cat /etc/<service>/.env` fails
+- [ ] Data in `/var/lib/<service>` (owner = the service account, mode `0700`) and logs in `/var/log/<service>`, created by systemd with `StateDirectory=` and `LogsDirectory=`; no `ReadWritePaths=` for them
 
 ```bash
-# How to create it correctly
-sudo -u shipit touch "$PROJECT_DIR/shared/.env"
-sudo chmod 600 "$PROJECT_DIR/shared/.env"
-sudo -u shipit vi "$PROJECT_DIR/shared/.env"
+# How to set it correctly
+sudo install -d -o root -g svc-beyen-home -m 750 /etc/beyen-home
+sudo touch /etc/beyen-home/.env && sudo chmod 600 /etc/beyen-home/.env
+sudo vi /etc/beyen-home/.env
 ```
 
-> **Why 0600?** Even with `0750` on the parent directory, group members (e.g. `www-data`) would
-> be able to read a `0640` or `0644` `.env`. Mode `0600` makes it owner-only: only the
-> `shipit` process and root can read it.
+> **Why `/etc` and `/var` instead of the project directory?**
+> Whatever lives inside shipit's territory is inside the reach of anyone who
+> compromises shipit. systemd reads `EnvironmentFile=` as root before it starts
+> the service, so the secrets never need to be readable by shipit. This
+> does **not** hide them from the service itself: a process that has the secrets
+> in its environment leaks them when it is compromised. Limit that damage with
+> a separate database account and keys per service, and rotate on suspicion.
 
 ### 3.3 Systemd unit
 
 ```bash
-systemctl show beyen-home -p LoadState -p User -p WorkingDirectory
+systemctl show beyen-home -p LoadState -p User -p WorkingDirectory -p EnvironmentFiles
 ```
 
 - [ ] `LoadState=loaded`
-- [ ] `User=shipit` — **never empty, never `root`**
+- [ ] `User=` is the service's own account — **never empty, never `root`, and not `shipit`**
 - [ ] `WorkingDirectory=<dir>/current`
+- [ ] `EnvironmentFiles=` point into `/etc/<service>/`
+- [ ] `NoNewPrivileges=yes`, `ProtectSystem=strict`, `ProtectHome=yes`, `PrivateTmp=yes`, `PrivateDevices=yes`
 
-> `shipit check` already verifies these three fields.
-> Additionally, since the last security update, shipit's deploy path runs
-> `systemctl show -p User` before every restart and refuses to proceed if the
-> unit does not run as the `shipit` user. This is a runtime guard, not just a
-> pre-flight warning.
+> `shipit check` verifies the first four.
+> shipit also checks the unit before every restart, with `systemctl show -p User`,
+> and refuses to restart a unit whose `User=` is empty, root (or uid 0) or does
+> not exist on the machine. This is a runtime guard, not just a pre-flight warning.
+> A unit that still runs as `shipit` is accepted, so projects can be migrated one
+> at a time, but `shipit check` warns and `shipit status` marks it with `!`.
 
 ### 3.4 Sudoers entry for this service
 
@@ -184,13 +203,12 @@ For `type: next`:
 
 For `type: vite` served by nginx:
 
-- [ ] nginx's system user (`www-data` on Debian/Ubuntu) is in the `shipit` group:
+- [ ] The project directory belongs to nginx's group (`www-data` on Debian/Ubuntu), not to a service group:
   ```bash
-  groups www-data   # should include shipit
-  # If not:
-  sudo usermod -aG shipit www-data && sudo systemctl reload nginx
+  sudo chown shipit:www-data /srv/app/beyen-web
+  sudo chmod 2750 /srv/app/beyen-web
   ```
-- [ ] This gives nginx read access to the `0750` project directory while keeping `.env` private
+- [ ] No `.env` and no other secret lives in that directory: static sites have none
 
 ### 3.6 GitHub repository and token
 
@@ -216,11 +234,15 @@ sudo shipit check
 | `/etc/shipit/shipit.yaml` | `shipit:shipit` | `0600` | install.sh |
 | `/etc/sudoers.d/shipit` | `root:root` | `0440` | admin |
 | `/var/lib/shipit/` | `shipit:shipit` | `0700` | install.sh |
-| `/srv/app/<project>/` | `shipit:shipit` | `0750` ⚠ | admin |
-| `/srv/app/<project>/releases/` | `shipit:shipit` | `0750` | shipit (auto) |
-| `/srv/app/<project>/shared/` | `shipit:shipit` | `0750` ⚠ | admin |
-| `/srv/app/<project>/shared/.env` | `shipit:shipit` | `0600` ⚠ | admin |
-| `/srv/app/<project>/.shipit.lock` | `shipit:shipit` | `0600` | shipit (auto) |
+| `/srv/app/` and every directory above the projects | `root:root` | `0755` | admin |
+| `/srv/app/<project>/` | `shipit:svc-<service>` | `2750` ⚠ | admin |
+| `/srv/app/<project>/releases/` and what is below | `shipit:svc-<service>` | `0755` (group can always read and run) | shipit (auto) |
+| `/srv/app/<project>/.shipit.lock` | `shipit:svc-<service>` | `0600` | shipit (auto) |
+| `/etc/<service>/` | `root:svc-<service>` | `0750` ⚠ | admin |
+| `/etc/<service>/.env` | `root:root` | `0600` ⚠ | admin |
+| `/etc/<service>/config.yaml` and similar | `root:svc-<service>` | `0640` ⚠ | admin |
+| `/var/lib/<service>/` | `svc-<service>:svc-<service>` | `0700` | systemd (`StateDirectory=`) |
+| `/var/log/<service>/` | `svc-<service>:svc-<service>` | `0755` (`0750` with `LogsDirectoryMode=`) | systemd (`LogsDirectory=`) |
 
 ⚠ = not enforced by shipit; must be set manually.
 
@@ -236,22 +258,23 @@ the prerequisite they need, and the control that blocks it.
 | # | Attack path | Prerequisite | Control |
 |---|------------|-------------|---------|
 | R1 | Overly permissive sudoers (`systemctl restart *`) → restart a root-owned service → that service executes attacker-controlled code | Access to `shipit` user (webhook or local) | **Exact service name in every sudoers rule** |
-| R2 | Unit file has `User=root` or no `User=` → deploy malicious release → restart → root execution | HMAC secret + misconfigured unit | **shipit now checks unit `User=` before every restart** (deploy-time guard); `shipit check` also validates |
+| R2 | Unit file has `User=root` or no `User=` → deploy malicious release → restart → root execution | HMAC secret + misconfigured unit | **shipit checks the unit's `User=` before every restart** and refuses an empty, root, uid-0 or unknown account (deploy-time guard); `shipit check` also validates |
 | R3 | Supply chain: `beyenpay/shipit` GitHub account compromised → malicious binary in release → `self-update` installs it → runs as root | Compromise of the shipit repository or its CI | Pin `SHIPIT_VERSION`; review binary before upgrading in sensitive environments |
 
-### High — code execution as `shipit` user
+### High — code execution as `shipit` or as a service account
 
 | # | Attack path | Prerequisite | Control |
 |---|------------|-------------|---------|
-| R4 | HMAC secret exposed → attacker calls `POST /v1/deploy` with malicious tag → arbitrary code runs as `shipit` | Secret leak (CI secrets, logs, network sniff) | Rotate secret immediately on exposure; use TLS proxy to hide request contents |
-| R5 | `.env` world-readable (`0644`) → attacker reads database password / API key → credential-based access to backend systems | Local user on the same machine, or any process running on the server | **`chmod 600 shared/.env`** |
+| R4 | HMAC secret exposed → attacker calls `POST /v1/deploy` with malicious tag → arbitrary code runs as the service account | Secret leak (CI secrets, logs, network sniff) | Rotate secret immediately on exposure; use TLS proxy to hide request contents |
+| R5 | `.env` world-readable (`0644`) → attacker reads database password / API key → credential-based access to backend systems | Local user on the same machine, or any process running on the server | **`.env` in `/etc/<service>`, owner `root:root`, mode `0600`** |
 
 ### Medium — information disclosure or lateral movement
 
 | # | Attack path | Prerequisite | Control |
 |---|------------|-------------|---------|
-| R6 | Project directory world-readable (`0755`) → local user reads deployed source code → finds hardcoded secrets or exploitable logic | Local user on the same machine | **`chmod 750 /srv/app/<project>`** |
-| R7 | One project's running code is compromised → reads `shared/.env` of all other projects (all share the `shipit` user) | Compromise of any single project's code | Understood architectural trade-off: single user = single trust boundary. Mitigated by keeping each `.env` at `0600` |
+| R6 | Project directory world-readable (`0755`) → local user reads deployed source code → finds hardcoded secrets or exploitable logic | Local user on the same machine | **project directory `2750`, owned by `shipit:svc-<service>`** |
+| R7 | One service's code is compromised → reads the `.env` and the code of the others, or plants code in them | Compromise of any single project's code | **Each service runs as its own account**: it cannot read other services' `/etc`, `/var` or project directories, and cannot write its own code. Residual: services that still run as `shipit` share one trust boundary with it and each other; `shipit status` marks them with `!` and `shipit check` warns |
+| R12 | `shipit` (or the webhook) is compromised → attacker plants code in a release and restarts the service → the code runs as that service's account | R4, or a vulnerability in shipit | Cannot read any service's secrets or data (they are outside its reach); its only root capability is the exact restart lines in sudoers. Residual: it can still deploy code to every service it manages, since that is its job. Protect the secret and the release process |
 
 ### Low — contained or authenticated
 
@@ -281,10 +304,12 @@ Run this after installing shipit or adding a project. Adjust paths as needed.
 ```bash
 #!/usr/bin/env bash
 # Quick permission audit for shipit and one project.
-# Usage: bash audit.sh /srv/app/beyen-home/web
+# Usage: bash audit.sh /srv/app/beyen-home/web beyen-home
 
 set -euo pipefail
 PROJECT_DIR="${1:-/srv/app/myproject}"
+SERVICE="${2:-myproject}"
+ACCT="svc-$SERVICE"
 PASS="  ✔"; FAIL="  ✘"
 
 check() {
@@ -298,38 +323,50 @@ check() {
 
 echo "=== shipit installation ==="
 check "/usr/local/bin/shipit owner:mode" \
-  "root:root 0755" \
+  "root:root 755" \
   "$(stat -c '%U:%G %a' /usr/local/bin/shipit 2>/dev/null || echo missing)"
 
 check "/etc/shipit/ owner:mode" \
-  "shipit:shipit 0700" \
+  "shipit:shipit 700" \
   "$(stat -c '%U:%G %a' /etc/shipit 2>/dev/null || echo missing)"
 
 check "/etc/shipit/shipit.yaml owner:mode" \
-  "shipit:shipit 0600" \
+  "shipit:shipit 600" \
   "$(stat -c '%U:%G %a' /etc/shipit/shipit.yaml 2>/dev/null || echo missing)"
 
 check "/etc/sudoers.d/shipit owner:mode" \
-  "root:root 0440" \
+  "root:root 440" \
   "$(stat -c '%U:%G %a' /etc/sudoers.d/shipit 2>/dev/null || echo missing)"
 
 echo ""
-echo "=== project: $PROJECT_DIR ==="
+echo "=== project: $PROJECT_DIR (service $SERVICE, account $ACCT) ==="
 check "$PROJECT_DIR owner:mode" \
-  "shipit:shipit 0750" \
+  "shipit:$ACCT 2750" \
   "$(stat -c '%U:%G %a' "$PROJECT_DIR" 2>/dev/null || echo missing)"
 
-check "$PROJECT_DIR/shared owner:mode" \
-  "shipit:shipit 0750" \
-  "$(stat -c '%U:%G %a' "$PROJECT_DIR/shared" 2>/dev/null || echo missing)"
+check "$(dirname "$PROJECT_DIR") owner" \
+  "root:root" \
+  "$(stat -c '%U:%G' "$(dirname "$PROJECT_DIR")" 2>/dev/null || echo missing)"
 
-if [ -f "$PROJECT_DIR/shared/.env" ]; then
-  check "$PROJECT_DIR/shared/.env owner:mode" \
-    "shipit:shipit 0600" \
-    "$(stat -c '%U:%G %a' "$PROJECT_DIR/shared/.env")"
+check "/etc/$SERVICE owner:mode" \
+  "root:$ACCT 750" \
+  "$(stat -c '%U:%G %a' "/etc/$SERVICE" 2>/dev/null || echo missing)"
+
+if [ -f "/etc/$SERVICE/.env" ]; then
+  case "$(stat -c '%U:%G %a' "/etc/$SERVICE/.env")" in
+    "root:root 600" | "root:$ACCT 640") echo "$PASS /etc/$SERVICE/.env owner:mode" ;;
+    *) echo "$FAIL /etc/$SERVICE/.env — want root:root 600 (or root:$ACCT 640)" ;;
+  esac
+  if sudo -u shipit test -r "/etc/$SERVICE/.env"; then
+    echo "$FAIL shipit can read /etc/$SERVICE/.env"
+  else
+    echo "$PASS shipit cannot read /etc/$SERVICE/.env"
+  fi
 else
-  echo "  - $PROJECT_DIR/shared/.env does not exist yet (create it before first deploy)"
+  echo "  - /etc/$SERVICE/.env does not exist yet"
 fi
+
+check "systemd User=" "$ACCT" "$(systemctl show "$SERVICE" -p User --value 2>/dev/null || echo missing)"
 
 echo ""
 echo "=== shipit check (automated) ==="
@@ -340,12 +377,13 @@ sudo shipit check
 
 ## Summary
 
-`shipit check` handles the **application-layer** validation (config, units, sudoers rules, GitHub access).
-The **filesystem-layer** validation (directory modes, `.env` mode) is not enforced automatically and
+`shipit check` handles the **application-layer** validation (config, units, sudoers rules,
+whether shipit can read a service's environment files, GitHub access). The **filesystem-layer**
+validation (directory modes, the files in `/etc/<service>`) is not enforced automatically and
 must be set during provisioning.
 
 The three items most likely to be missed and most dangerous if wrong:
 
 1. **sudoers rule with a wildcard** → path to root (R1)
-2. **`.env` mode `0644` instead of `0600`** → credential leak (R5)
-3. **Project directory mode `0755` instead of `0750`** → source code readable by any local user (R6)
+2. **a service that still runs as `shipit`, or a `.env` inside the project directory** → one compromised service reaches all of them (R7); look for `!` in `shipit status`
+3. **a `.env` readable by others (mode `0644`)** → credential leak (R5)

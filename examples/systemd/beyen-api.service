@@ -1,24 +1,44 @@
 # /etc/systemd/system/beyen-api.service   (Go binary)
 #
-#   sudo mkdir -p /srv/app/beyen-api/shared
-#   sudo chown -R shipit:shipit /srv/app/beyen-api
-#   sudo chmod 750 /srv/app/beyen-api         # deny local users outside the shipit group
-#   sudo -u shipit touch /srv/app/beyen-api/shared/.env
-#   sudo chmod 600 /srv/app/beyen-api/shared/.env        # owner-only
-#   sudo -u shipit vi /srv/app/beyen-api/shared/.env
+# Each service runs as an account of its own. shipit writes the code, the
+# service only reads it, and shipit never sees the secrets. Create once:
+#
+#   sudo useradd --system --no-create-home --shell /usr/sbin/nologin svc-beyen-api
+#   sudo mkdir -p /srv/app/beyen-api
+#   sudo chown shipit:svc-beyen-api /srv/app/beyen-api
+#   sudo chmod 2750 /srv/app/beyen-api             # setgid: new releases inherit the group
+#   sudo install -d -o root -g svc-beyen-api -m 750 /etc/beyen-api
+#   sudo touch /etc/beyen-api/.env && sudo chmod 600 /etc/beyen-api/.env     # root:root, systemd reads it
+#   sudo vi /etc/beyen-api/.env
 #   sudo systemctl daemon-reload && sudo systemctl enable beyen-api
+#
+# /srv/app must belong to root. Data and logs go to /var/lib/beyen-api and
+# /var/log/beyen-api, which systemd creates below: point the program there
+# (or log to stdout), it cannot write into its own directory.
 
 [Unit]
 Description=beyen-api
 After=network.target
 
 [Service]
-User=shipit
+User=svc-beyen-api
+Group=svc-beyen-api
 WorkingDirectory=/srv/app/beyen-api/current
-EnvironmentFile=/srv/app/beyen-api/shared/.env
+EnvironmentFile=/etc/beyen-api/.env
 ExecStart=/srv/app/beyen-api/current/beyen-api
 Restart=always
 RestartSec=2
+
+StateDirectory=beyen-api
+StateDirectoryMode=0700
+LogsDirectory=beyen-api
+
+# Sandbox
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
 
 [Install]
 WantedBy=multi-user.target

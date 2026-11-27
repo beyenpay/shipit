@@ -204,7 +204,7 @@ func (d *Deployer) begin(p *config.Project) (unlock func(), err error) {
 	if fi, err := os.Stat(p.Dir); err != nil || !fi.IsDir() {
 		return nil, fmt.Errorf("%s: dir %s does not exist (create it and give it to the shipit user)", p.Name, p.Dir)
 	}
-	if err := os.MkdirAll(releasesDir(p), 0o755); err != nil {
+	if err := release.MkdirAll(releasesDir(p), 0o755); err != nil {
 		return nil, err
 	}
 	l, err := acquire(filepath.Join(p.Dir, lockName))

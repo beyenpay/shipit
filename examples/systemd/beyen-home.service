@@ -1,28 +1,49 @@
 # /etc/systemd/system/beyen-home.service   (Next.js, standalone output)
 #
-# Create the project once:
-#   sudo mkdir -p /srv/app/beyen-home/web/shared
-#   sudo chown -R shipit:shipit /srv/app/beyen-home
-#   sudo chmod 750 /srv/app/beyen-home        # deny local users outside the shipit group
-#   sudo -u shipit touch /srv/app/beyen-home/web/shared/.env
-#   sudo chmod 600 /srv/app/beyen-home/web/shared/.env   # owner-only; shipit webhook must not leak it
-#   sudo -u shipit vi /srv/app/beyen-home/web/shared/.env
+# Each service runs as an account of its own. shipit writes the code, the
+# service only reads it, and shipit never sees the secrets. Create once:
+#
+#   sudo useradd --system --no-create-home --shell /usr/sbin/nologin svc-beyen-home
+#   sudo mkdir -p /srv/app/beyen-home/web
+#   sudo chown shipit:svc-beyen-home /srv/app/beyen-home/web
+#   sudo chmod 2750 /srv/app/beyen-home/web        # setgid: new releases inherit the group
+#   sudo install -d -o root -g svc-beyen-home -m 750 /etc/beyen-home
+#   sudo touch /etc/beyen-home/.env && sudo chmod 600 /etc/beyen-home/.env   # root:root, systemd reads it
+#   sudo vi /etc/beyen-home/.env
 #   sudo systemctl daemon-reload && sudo systemctl enable beyen-home
 # (do not start it: <dir>/current does not exist until the first deploy)
+#
+# /srv/app and /srv/app/beyen-home must belong to root. Data and logs go to
+# /var/lib/beyen-home and /var/log/beyen-home, which systemd creates below.
 
 [Unit]
 Description=beyen-home
 After=network.target
 
 [Service]
-# Never root: shipit can write the code this unit executes.
-User=shipit
+# Never root, and not shared with another service: shipit writes the code
+# this unit executes, and refuses to restart a unit that would run as root.
+User=svc-beyen-home
+Group=svc-beyen-home
 WorkingDirectory=/srv/app/beyen-home/web/current
-EnvironmentFile=/srv/app/beyen-home/web/shared/.env
+EnvironmentFile=/etc/beyen-home/.env
 Environment=NODE_ENV=production PORT=8012 HOSTNAME=127.0.0.1
 ExecStart=/usr/bin/node server.js
 Restart=always
 RestartSec=2
+
+# Created by systemd and given to the service account; writable despite
+# ProtectSystem=strict. The code directory itself is read-only to the service.
+StateDirectory=beyen-home
+StateDirectoryMode=0700
+LogsDirectory=beyen-home
+
+# Sandbox
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
 
 [Install]
 WantedBy=multi-user.target

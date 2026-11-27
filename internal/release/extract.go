@@ -23,8 +23,11 @@ const (
 // It is strict about what it accepts: only directories, regular files and
 // relative symlinks that stay inside dest. Absolute paths, "..", hard links,
 // devices and writes through symlinks are errors. Files are never overwritten,
-// and group/other write bits are dropped. The archive is unpacked as-is: a
-// leading top-level directory is not stripped.
+// and group/other write bits are dropped. The group gets the owner's read and
+// execute permission, whatever the archive says, so that the account a service
+// runs as (a member of the group of the project directory) can always read and
+// run what shipit unpacked; permissions never depend on shipit's umask. The
+// archive is unpacked as-is: a leading top-level directory is not stripped.
 func Extract(archive, dest string) error {
 	return extract(archive, dest, maxExtractBytes, maxExtractEntries)
 }
@@ -41,7 +44,7 @@ func extract(archive, dest string, maxBytes int64, maxEntries int) error {
 	}
 	defer gz.Close()
 
-	if err := os.MkdirAll(dest, 0o755); err != nil {
+	if err := MkdirAll(dest, 0o755); err != nil {
 		return err
 	}
 
@@ -84,17 +87,17 @@ func extract(archive, dest string, maxBytes int64, maxEntries int) error {
 				return fmt.Errorf("archive unpacks to more than %d bytes", maxBytes)
 			}
 			remaining -= hdr.Size
-			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			if err := MkdirAll(filepath.Dir(target), 0o755); err != nil {
 				return err
 			}
-			if err := writeFile(target, tr, hdr.FileInfo().Mode().Perm()&^0o022); err != nil {
+			if err := writeFile(target, tr, groupAccess(hdr.FileInfo().Mode().Perm()&^0o022)); err != nil {
 				return fmt.Errorf("extract %s: %w", rel, err)
 			}
 		case tar.TypeSymlink:
 			if err := checkLink(rel, hdr.Linkname); err != nil {
 				return err
 			}
-			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			if err := MkdirAll(filepath.Dir(target), 0o755); err != nil {
 				return err
 			}
 			if err := os.Symlink(hdr.Linkname, target); err != nil {
@@ -183,7 +186,7 @@ func makeDir(target string, perm fs.FileMode) error {
 		return nil
 	case errors.Is(err, fs.ErrNotExist):
 		// Keep owner rwx so we can fill it, whatever the archive says.
-		return os.MkdirAll(target, (perm&^0o022)|0o700)
+		return MkdirAll(target, groupAccess((perm&^0o022)|0o700))
 	default:
 		return err
 	}
@@ -194,9 +197,57 @@ func writeFile(target string, r io.Reader, perm fs.FileMode) error {
 	if err != nil {
 		return err
 	}
-	_, err = io.Copy(out, r)
+	// The mode given to OpenFile is filtered by the umask; set it for real.
+	if err = out.Chmod(perm); err == nil {
+		_, err = io.Copy(out, r)
+	}
 	if cerr := out.Close(); err == nil {
 		err = cerr
 	}
 	return err
+}
+
+// groupAccess gives the group the owner's read and execute permission.
+func groupAccess(perm fs.FileMode) fs.FileMode {
+	return perm | (perm&0o500)>>3
+}
+
+// MkdirAll is os.MkdirAll that gives every directory it creates exactly the
+// permission perm, instead of perm filtered by the umask. A umask of 077 would
+// otherwise make the directories unreadable to the group of the service that
+// has to run the release. The setgid bit that a directory inherits from its
+// parent is kept: it is what gives new entries the group of the project.
+func MkdirAll(dir string, perm fs.FileMode) error {
+	var created []string
+	for d := dir; ; {
+		_, err := os.Lstat(d)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+		created = append(created, d)
+		parent := filepath.Dir(d)
+		if parent == d {
+			break
+		}
+		d = parent
+	}
+	if err := os.MkdirAll(dir, perm); err != nil {
+		return err
+	}
+	for _, d := range created {
+		fi, err := os.Lstat(d)
+		if err != nil {
+			return err
+		}
+		if !fi.IsDir() { // replaced under our feet: not ours to change
+			continue
+		}
+		if err := os.Chmod(d, perm|fi.Mode()&fs.ModeSetgid); err != nil {
+			return err
+		}
+	}
+	return nil
 }

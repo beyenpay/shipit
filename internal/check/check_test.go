@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -39,11 +40,29 @@ func (s sys) run(_ context.Context, name string, args ...string) (string, error)
 	return r.out, r.err
 }
 
+// showAPI is the command check runs to inspect the unit of the api project.
+const showAPI = "systemctl show api -p LoadState -p User -p WorkingDirectory -p EnvironmentFiles"
+
+// fakeRunner mirrors the rules of deploy.ValidateRunner without looking at the
+// accounts of the machine the tests run on.
+func fakeRunner(user string) error {
+	switch user {
+	case "":
+		return errors.New("unit has no User= set, so it would run as root")
+	case "root":
+		return errors.New("unit runs as root")
+	}
+	return nil
+}
+
 type rig struct {
 	dir string
 	cfg string
 	sys sys
 	rem fakeRemote
+	// open maps a file to the error opening it as the shipit user gives. Files
+	// that are not listed are not readable.
+	open map[string]error
 }
 
 func (r *rig) checker(t *testing.T, y string, offline bool) *Checker {
@@ -54,6 +73,13 @@ func (r *rig) checker(t *testing.T, y string, offline bool) *Checker {
 	}
 	c := New(cfg, r.cfg, offline)
 	c.Run = r.sys.run
+	c.Runner = fakeRunner
+	c.Open = func(path string) error {
+		if err, ok := r.open[path]; ok {
+			return err
+		}
+		return fs.ErrPermission
+	}
 	c.Probe = func(context.Context, string) (PortState, string) { return PortShipit, "v1.2.0" }
 	c.Listen = func(string) error { return nil }
 	c.Remote = func(string) Remote { return r.rem }
@@ -72,7 +98,7 @@ func newRig(t *testing.T) *rig {
 	if err := os.Mkdir(proj, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	return &rig{dir: proj, cfg: cfg, sys: sys{}}
+	return &rig{dir: proj, cfg: cfg, sys: sys{}, open: map[string]error{}}
 }
 
 func render(secs []Section) (string, int) {
@@ -89,8 +115,8 @@ func goProject(dir string) string {
 
 func goSys(dir string) sys {
 	return sys{
-		"systemctl show api -p LoadState -p User -p WorkingDirectory": {out: "LoadState=loaded\nUser=shipit\nWorkingDirectory=" + dir + "/current"},
-		"sudo -n -l /usr/bin/systemctl restart api":                   {out: "/usr/bin/systemctl restart api"},
+		showAPI: {out: "LoadState=loaded\nUser=shipit\nWorkingDirectory=" + dir + "/current\nEnvironmentFiles=/etc/api/.env (ignore_errors=no)"},
+		"sudo -n -l /usr/bin/systemctl restart api": {out: "/usr/bin/systemctl restart api"},
 	}
 }
 
@@ -119,25 +145,25 @@ func TestFailures(t *testing.T) {
 		want   string
 	}{
 		{"unit missing", func(r *rig) {
-			r.sys["systemctl show api -p LoadState -p User -p WorkingDirectory"] = struct {
+			r.sys[showAPI] = struct {
 				out string
 				err error
 			}{out: "LoadState=not-found\nUser=\nWorkingDirectory="}
 		}, "not found"},
 		{"unit runs as root", func(r *rig) {
-			r.sys["systemctl show api -p LoadState -p User -p WorkingDirectory"] = struct {
+			r.sys[showAPI] = struct {
 				out string
 				err error
 			}{out: "LoadState=loaded\nUser=\nWorkingDirectory=" + r.dir + "/current"}
 		}, "would run as root"},
-		{"unit other user", func(r *rig) {
-			r.sys["systemctl show api -p LoadState -p User -p WorkingDirectory"] = struct {
+		{"unit runs as root explicitly", func(r *rig) {
+			r.sys[showAPI] = struct {
 				out string
 				err error
-			}{out: "LoadState=loaded\nUser=www-data\nWorkingDirectory=" + r.dir + "/current"}
-		}, `runs as "www-data"`},
+			}{out: "LoadState=loaded\nUser=root\nWorkingDirectory=" + r.dir + "/current"}
+		}, "unit runs as root"},
 		{"wrong working dir", func(r *rig) {
-			r.sys["systemctl show api -p LoadState -p User -p WorkingDirectory"] = struct {
+			r.sys[showAPI] = struct {
 				out string
 				err error
 			}{out: "LoadState=loaded\nUser=shipit\nWorkingDirectory=" + r.dir}
@@ -275,6 +301,177 @@ func TestTokenExpiry(t *testing.T) {
 		out, fails := render(newCheck(t, r, secret+"token: t\n", false))
 		if fails != 0 || !strings.Contains(out, tc.want) {
 			t.Errorf("expires %q: want %q in:\n%s", tc.expires, tc.want, out)
+		}
+	}
+}
+
+func unitOut(dir, user, env string) struct {
+	out string
+	err error
+} {
+	return struct {
+		out string
+		err error
+	}{out: "LoadState=loaded\nUser=" + user + "\nWorkingDirectory=" + dir + "/current\nEnvironmentFiles=" + env}
+}
+
+func TestUnitAccounts(t *testing.T) {
+	tests := []struct {
+		name     string
+		user     string
+		wantWarn bool
+	}{
+		{"own account", "svc-api", false},
+		{"shared shipit account", "shipit", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := newRig(t)
+			r.sys = goSys(r.dir)
+			r.sys[showAPI] = unitOut(r.dir, tt.user, "/etc/api/.env (ignore_errors=no)")
+			out, fails := render(newCheck(t, r, goProject(r.dir), false))
+			if fails != 0 {
+				t.Fatalf("unexpected failures:\n%s", out)
+			}
+			if !strings.Contains(out, "unit api.service found, User="+tt.user) {
+				t.Errorf("unit not reported OK:\n%s", out)
+			}
+			if got := strings.Contains(out, "one compromised service can reach them all"); got != tt.wantWarn {
+				t.Errorf("shared-account warning = %v, want %v:\n%s", got, tt.wantWarn, out)
+			}
+		})
+	}
+}
+
+func TestEnvFiles(t *testing.T) {
+	r0 := newRig(t)
+	inProject := filepath.Join(r0.dir, "shared", ".env")
+
+	tests := []struct {
+		name    string
+		env     string // value of EnvironmentFiles=
+		open    map[string]error
+		want    []string
+		notWant []string
+	}{
+		{
+			name:    "root-owned file is out of reach",
+			env:     "/etc/api/.env (ignore_errors=no)",
+			want:    []string{"✔ env file /etc/api/.env is not readable by shipit"},
+			notWant: []string{"! env file"},
+		},
+		{
+			name:    "readable file only warns",
+			env:     "/etc/api/.env (ignore_errors=no)",
+			open:    map[string]error{"/etc/api/.env": nil},
+			want:    []string{"! env file /etc/api/.env can be read by shipit", "/etc/api/.env owned by root"},
+			notWant: []string{"inside the project directory"},
+		},
+		{
+			name: "readable file in the project directory",
+			env:  inProject + " (ignore_errors=no)",
+			open: map[string]error{inProject: nil},
+			want: []string{"! env file " + inProject + " (inside the project directory) can be read by shipit"},
+		},
+		{
+			name: "several files and one readable",
+			env:  "/etc/api/.env (ignore_errors=no) /etc/api/extra.env (ignore_errors=yes)",
+			open: map[string]error{"/etc/api/extra.env": nil},
+			want: []string{"✔ env file /etc/api/.env is not readable", "! env file /etc/api/extra.env can be read"},
+		},
+		{
+			name: "path with spaces",
+			env:  "/etc/my api/.env (ignore_errors=no)",
+			want: []string{"env file /etc/my api/.env is not readable"},
+		},
+		{
+			name: "missing file the service needs",
+			env:  "/etc/api/.env (ignore_errors=no)",
+			open: map[string]error{"/etc/api/.env": fs.ErrNotExist},
+			want: []string{"! env file /etc/api/.env does not exist"},
+		},
+		{
+			name:    "missing optional file is fine",
+			env:     "/etc/api/.env (ignore_errors=yes)",
+			open:    map[string]error{"/etc/api/.env": fs.ErrNotExist},
+			notWant: []string{"env file"},
+		},
+		{
+			name: "unexpected error",
+			env:  "/etc/api/.env (ignore_errors=no)",
+			open: map[string]error{"/etc/api/.env": errors.New("input/output error")},
+			want: []string{"! env file /etc/api/.env: input/output error"},
+		},
+		{
+			name:    "no environment files",
+			env:     "",
+			notWant: []string{"env file"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := newRig(t)
+			r.sys = goSys(r.dir)
+			r.sys[showAPI] = unitOut(r.dir, "svc-api", strings.ReplaceAll(tt.env, inProject, filepath.Join(r.dir, "shared", ".env")))
+			for k, v := range tt.open {
+				r.open[strings.ReplaceAll(k, inProject, filepath.Join(r.dir, "shared", ".env"))] = v
+			}
+			out, fails := render(newCheck(t, r, goProject(r.dir), false))
+			if fails != 0 {
+				t.Fatalf("an env file problem must only warn, got %d failures:\n%s", fails, out)
+			}
+			out = strings.ReplaceAll(out, r.dir, "%DIR%")
+			for _, w := range tt.want {
+				if w = strings.ReplaceAll(w, inProject, "%DIR%/shared/.env"); !strings.Contains(out, w) {
+					t.Errorf("output lacks %q:\n%s", w, out)
+				}
+			}
+			for _, w := range tt.notWant {
+				if strings.Contains(out, w) {
+					t.Errorf("output has %q:\n%s", w, out)
+				}
+			}
+		})
+	}
+}
+
+func TestEnvFileGlob(t *testing.T) {
+	r := newRig(t)
+	dir := t.TempDir()
+	one := filepath.Join(dir, "a.env")
+	if err := os.WriteFile(one, []byte("A=1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r.sys = goSys(r.dir)
+	r.sys[showAPI] = unitOut(r.dir, "svc-api", filepath.Join(dir, "*.env")+" (ignore_errors=yes) "+filepath.Join(dir, "none-*.env")+" (ignore_errors=yes)")
+	r.open[one] = nil
+	out, fails := render(newCheck(t, r, goProject(r.dir), false))
+	if fails != 0 || !strings.Contains(out, "! env file "+one+" can be read") {
+		t.Errorf("glob not expanded:\n%s", out)
+	}
+	if strings.Contains(out, "none-") {
+		t.Errorf("an unmatched glob must stay silent:\n%s", out)
+	}
+}
+
+func TestCanOpen(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "x.env")
+	if err := os.WriteFile(f, []byte("A=1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := canOpen(f); err != nil {
+		t.Errorf("readable file: %v", err)
+	}
+	if err := canOpen(filepath.Join(dir, "missing")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("missing file: got %v, want ErrNotExist", err)
+	}
+	if os.Geteuid() != 0 { // root reads everything
+		if err := os.Chmod(f, 0); err != nil {
+			t.Fatal(err)
+		}
+		if err := canOpen(f); !errors.Is(err, fs.ErrPermission) {
+			t.Errorf("mode 0 file: got %v, want ErrPermission", err)
 		}
 	}
 }

@@ -3,7 +3,7 @@
 [English](README.md)
 
 从 GitHub Releases 拉取并部署 Go、Vite 和 Next.js 项目，运行在普通 Linux 服务器上。
-一个静态二进制文件、一个配置文件、一个系统用户，无需 Docker。
+一个静态二进制文件、一个配置文件，无需 Docker。
 
 推送一个 tag。CI 构建并发布 Release，调用服务器上的 shipit webhook，然后等待。
 shipit 下载 Release、校验完整性、切换符号链接、重启服务、检查健康状态，
@@ -17,7 +17,7 @@ shipit 下载 Release、校验完整性、切换符号链接、重启服务、�
 - **健康检查**：重启后可选轮询一个健康 URL；若新版本不健康，自动恢复到前一版本。
 - **支持公开和私有仓库**：私有仓库才需要 GitHub token。
 - **双架构支持**：Release 包含 `amd64` 和 `arm64` 两种包；每台服务器自动选择对应架构。
-- **最小权限**：一个 `shipit` 用户，以及对 `systemctl restart <service>` 精确的 sudo 权限，仅此而已。
+- **最小权限**：shipit 只负责部署。每个服务以自己独立的账号运行，shipit 读不到它们的密钥和数据；shipit 只有对 `systemctl restart <service>` 精确的 sudo 权限，仅此而已。
 - **配置面最小**：只有一个 YAML 文件。systemd unit、sudoers 和 nginx 仍由你管理，放在各自的常规位置。
 
 ## 工作原理
@@ -44,8 +44,10 @@ GitHub Actions ── 构建 ── 发布 Release（包 + checksums.txt）
   releases/v1.1.0/  releases/v1.2.0/
   current  -> releases/v1.2.0       当前线上版本
   previous -> releases/v1.1.0       `rollback` 回到的版本
-  shared/.env                       由你管理；shipit 从不修改
 ```
+
+这里不放别的东西。配置放在 `/etc/<service>`，数据和日志放在 `/var/lib/<service>` 和
+`/var/log/<service>`（见[添加项目](#添加项目)）。
 
 这两个符号链接是 shipit 保存的全部状态，没有数据库，没有可能与现实不一致的状态文件。
 
@@ -141,21 +143,39 @@ projects:
     health: http://127.0.0.1:8012/
 ```
 
-**2. 创建目录：**
+**2. 账号与目录。** shipit 负责部署，服务以自己独立的账号运行。每类文件只有一个位置、一个属主：
+
+| 路径 | 内容 | 属主 : 权限 |
+|---|---|---|
+| `/srv/app/beyen-home/web` | `releases/`、`current`、`previous`：shipit 只碰这些 | `shipit:svc-beyen-home` `2750` |
+| `/etc/beyen-home` | `.env`、配置文件 | `root:svc-beyen-home` `0750` |
+| `/etc/beyen-home/.env` | 密钥 | `root:root` `0600` |
+| `/var/lib/beyen-home`、`/var/log/beyen-home` | 数据和日志 | 由 systemd 创建，属于服务账号 |
 
 ```bash
-sudo mkdir -p /srv/app/beyen-home/web/shared
-sudo chown -R shipit:shipit /srv/app/beyen-home
-sudo chmod 750 /srv/app/beyen-home
-# 在填写内容前，以正确的属主和权限创建 .env
-sudo -u shipit touch /srv/app/beyen-home/web/shared/.env
-sudo chmod 600 /srv/app/beyen-home/web/shared/.env
-sudo -u shipit vi /srv/app/beyen-home/web/shared/.env
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin svc-beyen-home
+sudo mkdir -p /srv/app/beyen-home/web
+sudo chown shipit:svc-beyen-home /srv/app/beyen-home/web
+sudo chmod 2750 /srv/app/beyen-home/web       # setgid：每个新版本都继承该组
+sudo install -d -o root -g svc-beyen-home -m 750 /etc/beyen-home
+sudo touch /etc/beyen-home/.env && sudo chmod 600 /etc/beyen-home/.env
+sudo vi /etc/beyen-home/.env
 ```
+
+原因：shipit 能写代码，服务只能读，所以被攻破的服务无法植入重启后仍然存在的代码；
+服务看不到其他服务；shipit 也看不到任何服务的密钥，因为 systemd 在启动服务之前以
+root 身份读取 `EnvironmentFile=`。如果程序是自己打开 `.env` 文件而不是读环境变量，
+把该文件设为 `root:svc-beyen-home` `0640`。`dir` 的上层目录（`/srv/app`、
+`/srv/app/beyen-home`）应归 root 所有，这样 shipit 无法替换项目目录。
+
+程序只应写入 `/var/lib/beyen-home` 和 `/var/log/beyen-home`（或把日志输出到 stdout，
+由 journald 收集），不要写入自己的目录。
 
 **3. Systemd unit**（`/etc/systemd/system/beyen-home.service`）：
 参见 [`examples/systemd`](examples/systemd)。
-必须包含 `User=shipit` 和 `WorkingDirectory=<dir>/current`。
+需要 `User=svc-beyen-home`（任何不与其他服务共用的非 root 账号）、
+`WorkingDirectory=<dir>/current`、`EnvironmentFile=/etc/beyen-home/.env`，
+以及 `StateDirectory=`/`LogsDirectory=`，让 systemd 创建数据和日志目录。
 启用但暂不启动：
 
 ```bash
@@ -169,19 +189,22 @@ shipit ALL=(root) NOPASSWD: /usr/bin/systemctl restart beyen-home
 ```
 
 **5. 验证：** `sudo shipit check` 会告诉你还缺什么
-（unit 未找到、用户错误、工作目录错误、sudoers 规则缺失、仓库不可访问、token 即将过期）。
+（unit 未找到、以 root 运行、工作目录错误、sudoers 规则缺失、仓库不可访问、token 即将过期），
+并对 shipit 用户能读到的 `EnvironmentFile=`、以及仍以 `shipit` 运行的服务给出警告。
+`shipit status` 会显示每个服务以哪个账号运行。
 
-Vite 项目只需第 1、2 步：将 nginx 指向 `<dir>/current`，切换是原子的，无需 reload。
+仍以 `shipit` 运行、并把 `shared/.env` 放在项目目录里的旧项目可以继续工作，
+但它们与 shipit 以及彼此之间共用一个信任边界。`shipit status` 会用 `!` 标出它们。
+迁移方法见 [docs/deployment-guide.zh-CN.md](docs/deployment-guide.zh-CN.md#迁移已有项目)。
 
-由于项目目录为 `0750`，nginx 需要加入 `shipit` 组才能读取已部署的文件：
+Vite 项目只需第 1、2 步，且不需要服务账号：将 nginx 指向 `<dir>/current`，
+切换是原子的，无需 reload。把目录的属组设为 nginx 所在的组，它就能读取文件：
 
 ```bash
-sudo usermod -aG shipit www-data   # Debian/Ubuntu 上的 nginx；其他发行版请调整用户名
-sudo systemctl reload nginx
+sudo mkdir -p /srv/app/beyen-web
+sudo chown shipit:www-data /srv/app/beyen-web   # Debian/Ubuntu 上是 www-data；其他发行版请调整
+sudo chmod 2750 /srv/app/beyen-web
 ```
-
-这样 nginx 获得对已部署文件的组读权限，而 `shared/.env` 为 `0600`（仅属主可读），
-即使作为组成员 nginx 也无法读取它。
 
 ## 连接 GitHub
 
@@ -215,7 +238,7 @@ git tag v1.2.0 && git push --tags      # 构建、发布、部署
 在服务器上（以 root 或加 `sudo` 前缀）：
 
 ```bash
-shipit status                  # 每个项目的当前/上一版本及服务状态
+shipit status                  # 每个项目的版本、服务状态和运行账号（`!` 标出 shipit 和 root）
 shipit list beyen-home         # 磁盘上已有的 Release 列表
 shipit deploy beyen-home       # 部署最新 GitHub Release
 shipit deploy beyen-home v1.2.0  # 部署指定版本（磁盘上已有则不下载）
@@ -295,13 +318,16 @@ Job 在内存中保留一小时。若 shipit 重启，job 记录消失；
 - **请求签名**：HMAC 覆盖 method、path、timestamp 和 body。时间戳必须在 5 分钟内，每个签名只接受一次，捕获的请求无法重放或重定向到其他端点。secret 不经网络传输，这点在 webhook 默认使用 HTTP 时尤为重要。如需隐藏请求内容，可在前面加 TLS 代理，或为 GitHub runner 配置防火墙规则。
 - **频率限制**（按客户端 IP）：10 请求/秒（突发 20），1 分钟内 10 次认证失败的 IP 将被锁定剩余时间。全局限制会让任何人都能锁定 CI，所以按 IP 限制。
 - **Release 完整性**：每个包都会对照 `checksums.txt` 校验；解包时严格检查路径和符号链接规则、大小限制，不允许覆盖。这能防止数据损坏，但无法防范有权限向你仓库发布 Release 的攻击者——那个访问权限本身才是真正的安全边界。
-- **单一用户** 运行 shipit 和所有项目。systemd unit 必须声明 `User=shipit`；`shipit check` 对会以 root 运行的 unit 报错。在 deploy 时，`shipit` 也会通过 `systemctl show` 在每次 restart 前验证此项：若 unit 被错误配置为 root 运行，直接拒绝——即使不运行 `check` 也能保证此约束。唯一的 root 能力是你添加的精确 `sudo systemctl restart <service>` 行。
-- **Secret 保护**：配置文件（secret 和 token）必须为 `0600`；否则 shipit 拒绝启动服务。
-- **项目目录** 建议为 `0750`（属主 `shipit`，无世界读权限）。nginx 服务静态站点时需将其系统用户加入 `shipit` 组；`shared/.env` 为 `0600`，即使组成员也无法读取。shipit 不会强制检查它未创建的目录权限，请在初始化项目时手动设置。
+- **每个服务一个账号。** shipit 和各个服务以不同账号运行。unit 必须有非 root 的 `User=`；`shipit check` 对会以 root 运行的 unit 报错。每次 restart 之前，shipit 还会通过 `systemctl show` 再验证一次（账号必须存在且不能是 uid 0），所以即使不运行 `check` 也能保证这一点。唯一的 root 能力是你添加的精确 `sudo systemctl restart <service>` 行。
+- **密钥不在 shipit 够得着的地方。** `.env` 和配置文件放在 `/etc/<service>`，属主为 root；systemd 以 root 身份读取 `EnvironmentFile=`。`shipit check` 会对 shipit 用户能读到的每个 `EnvironmentFile=` 给出警告，`shipit status` 会标出仍以 `shipit` 运行的服务。
+- **配置文件**：配置（secret 和 token）必须为 `0600`；否则 shipit 拒绝启动服务。
+- **项目目录** 为 `shipit:<服务所在组>`，权限 `2750`：shipit 可写，服务只读，其他人无法进入。shipit 解包时保证该组始终能读取和运行发布内容，不受 umask 或压缩包内权限的影响。shipit 不会强制检查它未创建的目录权限，请在初始化项目时手动设置。
 - Webhook 优雅关闭：正在进行的 deploy 完成后进程才退出。
 
-由于单一用户同时拥有 webhook 和项目，攻破 shipit 意味着攻破所有已部署的应用。
-上述控制的目的是让这件事尽可能难以发生，而不是将二者隔离。
+被攻破的服务不再能波及其他服务：既读不到它们的密钥，也改不了它们的代码。
+被攻破的 shipit 仍然可以向它管理的每个服务部署代码（这本来就是它的职责），
+但读不到它们的密钥和数据。仍以 `shipit` 运行的服务与 shipit 以及彼此共用一个信任边界，
+所以 `status` 会标出它们。
 
 ## 卸载
 
@@ -327,6 +353,8 @@ shipit 不会删除它未创建的文件，如 `/etc/sudoers.d/shipit` 和你的
 | `built for EM_AARCH64 but this server is amd64` | 打包了错误的架构 |
 | `missing .next/static` | Next.js 包构建时未复制 `.next/static` |
 | `sudo: a password is required` | sudoers 行缺失或与命令不完全匹配 |
+| `refusing to restart ...: unit runs as root` | unit 没有 `User=`（或是 `User=root`）；给它一个独立的非 root 账号，然后 `systemctl daemon-reload` |
+| 服务启动后报文件 `Permission denied` | 服务账号读不了发布内容：项目目录的属组必须是 `svc-<name>`、权限 `2750`，目录里的文件也要是同一个组（`sudo chgrp -R`） |
 | `... rolled back to vX` | 新版本重启或健康检查失败；查看 `journalctl -u <service>` |
 | `another operation is in progress` | 该项目有 deploy 正在进行 |
 
